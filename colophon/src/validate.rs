@@ -22,9 +22,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Result;
 use crate::fs::Storage;
+use crate::identity::{self, Id};
+use crate::index::IndexStore;
 use crate::link::{self, Link};
 use crate::meta::Value;
-use crate::workspace::Workspace;
+use crate::workspace::{Target, Workspace};
 
 /// One integrity finding. `doc` is always the document that *declares* the
 /// problem (workspace-relative).
@@ -42,6 +44,14 @@ pub enum Finding {
     MissingInverse { doc: PathBuf, child: PathBuf, inverse: String },
     /// A document that exists but could not be read or parsed.
     Unreadable { doc: PathBuf, error: String },
+    /// A `colophon:<id>` reference whose ID fails the shape/check-character
+    /// test — almost certainly a typo, caught before it dangles silently.
+    MalformedId { doc: PathBuf, relation: String, target: String },
+    /// A well-formed `colophon:<id>` reference with no live registry entry.
+    /// `tombstoned` distinguishes "that document was deleted" from "this ID
+    /// was never issued here" (an out-of-band reference the registry has not
+    /// reconciled — DESIGN §4's known hazard).
+    DanglingId { doc: PathBuf, relation: String, id: Id, tombstoned: bool },
 }
 
 impl fmt::Display for Finding {
@@ -69,13 +79,26 @@ impl fmt::Display for Finding {
             Finding::Unreadable { doc, error } => {
                 write!(f, "{}: unreadable: {error}", doc.display())
             }
+            Finding::MalformedId { doc, relation, target } => write!(
+                f,
+                "{}: malformed ID in {relation} link: {target} (bad shape or check character)",
+                doc.display()
+            ),
+            Finding::DanglingId { doc, relation, id, tombstoned } => write!(
+                f,
+                "{}: dangling {relation} ID: colophon:{id} ({})",
+                doc.display(),
+                if *tombstoned { "document was deleted" } else { "never issued in this registry" }
+            ),
         }
     }
 }
 
-impl<FS: Storage, Id, Ix> Workspace<FS, Id, Ix> {
+impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// Check the workspace reachable from `start`, returning every finding.
     /// An empty result means the reachable graph holds its invariants.
+    /// `colophon:<id>` targets resolve through the registry; malformed and
+    /// dangling IDs are findings of their own.
     pub async fn check(&self, start: impl AsRef<Path>) -> Result<Vec<Finding>> {
         let start = link::normalize(start);
         let mut findings = Vec::new();
@@ -105,10 +128,27 @@ impl<FS: Storage, Id, Ix> Workspace<FS, Id, Ix> {
 
             for edge in self.relations().edges(&doc.meta) {
                 let target = Link::parse(&edge.target);
-                if target.is_external() {
-                    continue;
-                }
-                let resolved = link::resolve(&path, &target.target);
+                let resolved = match self.resolve_link(&path, &target) {
+                    Target::External => continue,
+                    Target::UnresolvedId(id) => {
+                        findings.push(if identity::verify(id.as_str()) {
+                            Finding::DanglingId {
+                                doc: path.clone(),
+                                relation: edge.relation.clone(),
+                                tombstoned: self.index().is_known(&id),
+                                id,
+                            }
+                        } else {
+                            Finding::MalformedId {
+                                doc: path.clone(),
+                                relation: edge.relation.clone(),
+                                target: target.target.clone(),
+                            }
+                        });
+                        continue;
+                    }
+                    Target::Path(p) => p,
+                };
                 match self.exact_name(&resolved).await {
                     NameMatch::Exact => {}
                     NameMatch::CaseOnly(actual) => {
@@ -150,7 +190,9 @@ impl<FS: Storage, Id, Ix> Workspace<FS, Id, Ix> {
                         .map(Value::link_strings)
                         .unwrap_or_default()
                         .iter()
-                        .any(|t| link::resolve(&resolved, &Link::parse(t).target) == path);
+                        .any(|t| {
+                            self.resolve_link(&resolved, &Link::parse(t)) == Target::Path(path.clone())
+                        });
                     if !points_back {
                         findings.push(Finding::MissingInverse {
                             doc: path.clone(),

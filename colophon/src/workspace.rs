@@ -21,9 +21,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::{Error, Result};
 use crate::fs::Storage;
-use crate::identity::NoIdentity;
-use crate::index::NoIndex;
+use crate::identity::{IdentityPolicy, NoIdentity, Trigger};
+use crate::index::{IndexStore, NoIndex};
+use crate::link::{self, Link};
 use crate::relation::RelationSet;
 
 /// A composed workspace: a filesystem, a relation vocabulary, an identity
@@ -70,6 +72,83 @@ impl<FS, Id, Ix> Workspace<FS, Id, Ix> {
     /// The index store.
     pub fn index(&self) -> &Ix {
         &self.index
+    }
+
+    /// Mutable access to the index store (e.g. to persist it after mutations).
+    pub fn index_mut(&mut self) -> &mut Ix {
+        &mut self.index
+    }
+}
+
+/// The resolution of one link target against a workspace: a path, an ID the
+/// registry does not currently resolve, or an off-workspace reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// A (normalized, workspace-relative) path.
+    Path(PathBuf),
+    /// A `colophon:<id>` reference with no live registry entry — unknown,
+    /// tombstoned, or the workspace has no registry at all.
+    UnresolvedId(crate::identity::Id),
+    /// A URL or mail address — never resolved against the workspace and never
+    /// rewritten by moves.
+    External,
+}
+
+impl<FS, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
+    /// Resolve `link` (declared in the document at `doc`) to a workspace
+    /// target. Path targets resolve relative to `doc`'s directory; a
+    /// `colophon:<id>` target resolves through the registry — the
+    /// location-independent path that stays valid across moves.
+    pub fn resolve_link(&self, doc: &Path, link: &Link) -> Target {
+        if link.is_external() {
+            return Target::External;
+        }
+        if let Some(id) = link.id_target() {
+            return match self.index.resolve(&id) {
+                Some(path) => Target::Path(link::normalize(path)),
+                None => Target::UnresolvedId(id),
+            };
+        }
+        Target::Path(link::resolve(doc, &link.target))
+    }
+}
+
+impl<FS: Storage, Id: IdentityPolicy, Ix: IndexStore> Workspace<FS, Id, Ix> {
+    /// Ensure the document at `path` has a registered stable ID, minting one if
+    /// needed, and return it. Idempotent: an already-registered document
+    /// returns its existing ID regardless of `event`.
+    ///
+    /// A fresh registration only happens when the identity policy's trigger
+    /// set fires on `event` (DESIGN §4's registration lifecycle) — an inactive
+    /// trigger is an error, so callers cannot silently grow the authoritative
+    /// set beyond what the policy allows.
+    pub async fn register(&mut self, path: &Path, event: Trigger) -> Result<crate::identity::Id> {
+        let path = link::normalize(path);
+        if let Some(id) = self.index.id_for_path(&path) {
+            return Ok(id);
+        }
+        if !self.identity.registration().fires_on(event) {
+            return Err(Error::Structure(format!(
+                "identity policy does not register on {event:?}"
+            )));
+        }
+        if !self.fs.try_exists(&self.root.join(&path)).await? {
+            return Err(Error::Structure(format!("{} does not exist", path.display())));
+        }
+        let id = self.mint_unique(&path);
+        self.index.register(&id, &path);
+        Ok(id)
+    }
+
+    /// Mint until the ID is unknown to the index — including tombstones, so a
+    /// deleted document's ID is never reissued to mean something else.
+    pub(crate) fn mint_unique(&mut self, path: &Path) -> crate::identity::Id {
+        loop {
+            let id = self.identity.mint(path);
+            if !self.index.is_known(&id) {
+                return id;
+            }
+        }
     }
 }
 
@@ -165,7 +244,7 @@ mod tests {
     fn identity_opts_in_via_one_builder_line() {
         let ws = Workspace::builder(DummyFs)
             .root("vault")
-            .identity(Minter::lazy())
+            .identity(Minter::lazy(1))
             .index(InMemoryIndex::new())
             .build();
         assert!(ws.identity().registration().on_link);

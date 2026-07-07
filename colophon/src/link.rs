@@ -63,6 +63,25 @@ impl Link {
     pub fn is_external(&self) -> bool {
         self.target.contains("://") || self.target.starts_with("mailto:")
     }
+
+    /// The stable ID this link names, when the target uses the
+    /// `colophon:<id>` scheme — the location-independent alternative to a
+    /// relative path. Such targets resolve through the workspace's ID
+    /// registry, never against the filesystem, and are deliberately *not*
+    /// rewritten by moves: staying valid across moves is their entire point.
+    pub fn id_target(&self) -> Option<crate::identity::Id> {
+        self.target
+            .strip_prefix(ID_SCHEME)
+            .map(|id| crate::identity::Id(id.to_string()))
+    }
+}
+
+/// The target scheme marking a link-by-ID: `colophon:<id>`.
+pub const ID_SCHEME: &str = "colophon:";
+
+/// Render an ID as a link target (`colophon:<id>`).
+pub fn id_target(id: &crate::identity::Id) -> String {
+    format!("{ID_SCHEME}{id}")
 }
 
 /// Lexically normalize a relative path: drop `.` components and fold

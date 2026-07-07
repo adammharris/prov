@@ -14,9 +14,10 @@ use std::pin::Pin;
 use crate::document::Document;
 use crate::error::Result;
 use crate::fs::Storage;
+use crate::index::IndexStore;
 use crate::link::{self, Link};
 use crate::meta::Value;
-use crate::workspace::Workspace;
+use crate::workspace::{Target, Workspace};
 
 /// Why a node appears in the tree the way it does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,9 @@ pub enum NodeKind {
     Cycle,
     /// A file that exists but could not be read or parsed; the message says why.
     Unreadable(String),
+    /// A `colophon:<id>` target the registry does not currently resolve
+    /// (unknown, tombstoned, or no registry attached).
+    UnresolvedId(crate::identity::Id),
 }
 
 /// One node of the materialized spanning tree.
@@ -47,9 +51,10 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
-impl<FS: Storage, Id, Ix> Workspace<FS, Id, Ix> {
+impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
     /// Materialize the spanning tree rooted at `start` (a workspace-relative
-    /// path). Missing, unreadable, and cyclic targets become marked nodes.
+    /// path). Missing, unreadable, cyclic, and unresolved-ID targets become
+    /// marked nodes. `colophon:<id>` targets resolve through the registry.
     pub async fn tree(&self, start: impl AsRef<Path>) -> Result<Node> {
         let start = link::normalize(start);
         let mut trail: Vec<PathBuf> = Vec::new();
@@ -108,10 +113,20 @@ impl<FS: Storage, Id, Ix> Workspace<FS, Id, Ix> {
             let mut children = Vec::new();
             for raw in self.relations().children(&doc.meta) {
                 let child = Link::parse(&raw);
-                if child.is_external() {
-                    continue;
-                }
-                let child_path = link::resolve(&path, &child.target);
+                let child_path = match self.resolve_link(&path, &child) {
+                    Target::External => continue,
+                    Target::UnresolvedId(id) => {
+                        children.push(Node {
+                            path: PathBuf::from(child.target.clone()),
+                            title: None,
+                            label: child.label,
+                            kind: NodeKind::UnresolvedId(id),
+                            children: Vec::new(),
+                        });
+                        continue;
+                    }
+                    Target::Path(p) => p,
+                };
                 children.push(self.tree_node(child_path, child.label, trail).await?);
             }
             trail.pop();

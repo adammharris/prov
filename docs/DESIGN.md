@@ -281,8 +281,9 @@ not yet ported.
 | Embedded metadata (parse/serialize, dynamic value) | `meta` | ✅ implemented + tested (format-parametric) |
 | Document splitting (frontmatter fence) | `document` | ✅ all fig archetypes via `fig::detect` (`---`, `;;;`, ```` ```fig ````, endmatter); `EmbedType` recorded per document |
 | Relation vocabulary + edge/child extraction | `relation` | ✅ implemented + tested |
-| Identity policy + registration triggers | `identity` | ✅ seam + placeholder minter |
-| Index store (id↔path registry) | `index` | ✅ `NoIndex` + `InMemoryIndex` |
+| Identity policy + registration triggers | `identity` | ✅ betanumeric+check minter (ARK lineage, no shoulder), `Trigger` events, `Workspace::register` (idempotent, policy-gated), mint-by-rejection |
+| Index store (id↔path registry) | `index` | ✅ `NoIndex` + `InMemoryIndex` + persistent `FileIndex` (sorted snapshot, tombstones, any fig format) |
+| ID links (`colophon:<id>` targets) | `link`/`tree`/`validate`/`mutate` | ✅ resolve through the registry everywhere paths do; never rewritten by moves (the registry update is the maintenance); findings: `MalformedId` (check char), `DanglingId` (tombstoned vs never-issued) |
 | Workspace composition + builder | `workspace` | ✅ type-flipping builder |
 | Traverse (spanning tree from a root) | `tree` | ✅ `Workspace::tree`; missing/cyclic/unreadable targets are marked nodes |
 | Scan (directory-driven discovery) | — | ⏳ waits on `StructureSource` |
@@ -297,11 +298,16 @@ not yet ported.
 
 ## 10. Open questions
 
-1. **Does the ID registry ever need to survive without its documents?** (i.e. is
-   an ID meaningful after its file is deleted — tombstones, history, sync
-   reconciliation?) If yes, the registry is authoritative-with-history and should
-   be an append-only log from day one. If no, the "shadow ID in frontmatter →
-   index is a pure cache" route is strictly simpler.
+1. ~~**Does the ID registry ever need to survive without its documents?**~~
+   **Answered: yes, minimally — tombstones, not history.** Deleting a document
+   retires its ID to a tombstone (`id: null` in the snapshot): the ID stops
+   resolving but is never forgotten, so mint-by-rejection can never reissue it
+   and a dangling `colophon:` reference stays *diagnosable* ("that document was
+   deleted" vs "never issued here"). This is cheaper than an append-only log —
+   the registry stays a sorted, diff-friendly snapshot — while still refusing to
+   let an ID silently change meaning. Full history/event-log stores remain
+   possible behind `IndexStore` (e.g. for sync), but the file-backed default
+   does not need them.
 2. **How first-class is the filesystem `StructureSource`** — a genuine peer to
    frontmatter links, or an onboarding/migration convenience for users who have
    not adopted embedded links? This sets how much to invest in the abstraction.

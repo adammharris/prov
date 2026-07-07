@@ -14,7 +14,15 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use colophon::tree::{Node, NodeKind};
-use colophon::{Document, Format, RelationSet, StdFs, Value, Workspace, block_on, edit, meta};
+use colophon::{
+    Document, FileIndex, Format, Id, IndexStore, Minter, RelationSet, StdFs, Trigger, Value,
+    Workspace, block_on, edit, link, meta,
+};
+
+/// Where the persistent ID registry lives, relative to the workspace root.
+/// User-owned data in the tree, per DESIGN §6 — not an app-private dotfolder
+/// format, just a fig-parseable snapshot anyone can read.
+const INDEX_PATH: &str = ".colophon/index.yaml";
 
 /// A self-describing plaintext workspace, from the command line.
 #[derive(Parser)]
@@ -113,6 +121,19 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Ensure a document has a stable ID and print its `colophon:<id>` target.
+    /// Registers it in .colophon/index.yaml on first use — link that target
+    /// from any document and it survives moves.
+    Id {
+        /// Path to a document.
+        file: PathBuf,
+    },
+    /// Resolve a stable ID (with or without the `colophon:` prefix) to its
+    /// current path.
+    Resolve {
+        /// The ID to resolve.
+        id: String,
+    },
 }
 
 /// CLI spelling of the metadata formats colophon compiles in.
@@ -148,6 +169,8 @@ fn main() -> ExitCode {
         Command::New { path, parent } => cmd_new(&path, &parent),
         Command::Mv { from, to } => cmd_mv(&from, &to),
         Command::Rm { path, force } => cmd_rm(&path, force),
+        Command::Id { file } => cmd_id(&file),
+        Command::Resolve { id } => cmd_resolve(&id),
     };
     match result {
         Ok(code) => code,
@@ -166,10 +189,41 @@ fn relation_set() -> RelationSet {
     RelationSet::diaryx()
 }
 
-/// The workspace the multi-document commands drive: the process filesystem,
-/// rooted at the current directory, paths-only.
-fn workspace() -> Workspace<StdFs> {
-    Workspace::builder(StdFs).build()
+/// The workspace the multi-document commands drive: the process filesystem
+/// rooted at the current directory, a lazy identity policy, and the persistent
+/// registry loaded from [`INDEX_PATH`] (empty when absent — the registry only
+/// materializes on disk once something registers).
+fn workspace() -> Result<Workspace<StdFs, Minter, FileIndex>, Box<dyn std::error::Error>> {
+    let index = match std::fs::read_to_string(INDEX_PATH) {
+        Ok(text) => FileIndex::from_str(&text, Format::Yaml)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileIndex::new(Format::Yaml),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Workspace::builder(StdFs)
+        .identity(Minter::lazy(entropy_seed()))
+        .index(index)
+        .build())
+}
+
+/// Persist the registry when a command changed it.
+fn save_index(ws: &mut Workspace<StdFs, Minter, FileIndex>) -> Result<(), Box<dyn std::error::Error>> {
+    if !ws.index().is_dirty() {
+        return Ok(());
+    }
+    if let Some(dir) = Path::new(INDEX_PATH).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(INDEX_PATH, ws.index().render()?)?;
+    ws.index_mut().mark_clean();
+    Ok(())
+}
+
+/// A seed for the minter from OS-seeded hasher state — dependency-free
+/// randomness. (Uniqueness is enforced by rejection against the registry;
+/// the seed only needs to differ between runs.)
+fn entropy_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::hash::RandomState::new().build_hasher().finish()
 }
 
 fn load(file: &Path) -> Result<(String, Document), Box<dyn std::error::Error>> {
@@ -294,7 +348,7 @@ fn cmd_unset(file: &Path, key: &str) -> CmdResult {
 }
 
 fn cmd_tree(root: &Path) -> CmdResult {
-    let node = block_on(workspace().tree(root))?;
+    let node = block_on(workspace()?.tree(root))?;
     print_node(&node, "", true, true);
     Ok(ExitCode::SUCCESS)
 }
@@ -318,6 +372,7 @@ fn print_node(node: &Node, prefix: &str, is_last: bool, is_root: bool) {
         NodeKind::Missing => " (missing)".to_string(),
         NodeKind::Cycle => " (cycle!)".to_string(),
         NodeKind::Unreadable(e) => format!(" (unreadable: {e})"),
+        NodeKind::UnresolvedId(id) => format!(" (unresolved id: {id})"),
     };
     println!("{connector}{name}{marker}");
     let child_prefix = if is_root {
@@ -331,7 +386,7 @@ fn print_node(node: &Node, prefix: &str, is_last: bool, is_root: bool) {
 }
 
 fn cmd_check(root: &Path) -> CmdResult {
-    let findings = block_on(workspace().check(root))?;
+    let findings = block_on(workspace()?.check(root))?;
     for finding in &findings {
         println!("{finding}");
     }
@@ -345,19 +400,52 @@ fn cmd_check(root: &Path) -> CmdResult {
 }
 
 fn cmd_new(path: &Path, parent: &Path) -> CmdResult {
-    block_on(workspace().create(path, parent))?;
+    let mut ws = workspace()?;
+    block_on(ws.create(path, parent))?;
+    save_index(&mut ws)?;
     println!("created {} (in {})", path.display(), parent.display());
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_mv(from: &Path, to: &Path) -> CmdResult {
-    block_on(workspace().rename(from, to))?;
+    let mut ws = workspace()?;
+    block_on(ws.rename(from, to))?;
+    save_index(&mut ws)?;
     println!("moved {} -> {}", from.display(), to.display());
     Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_rm(path: &Path, force: bool) -> CmdResult {
-    block_on(workspace().delete(path, force))?;
+    let mut ws = workspace()?;
+    block_on(ws.delete(path, force))?;
+    save_index(&mut ws)?;
     println!("deleted {}", path.display());
     Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_id(file: &Path) -> CmdResult {
+    let mut ws = workspace()?;
+    let id = block_on(ws.register(file, Trigger::Link))?;
+    save_index(&mut ws)?;
+    println!("{}", link::id_target(&id));
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_resolve(id: &str) -> CmdResult {
+    let ws = workspace()?;
+    let id = Id(id.strip_prefix(link::ID_SCHEME).unwrap_or(id).to_string());
+    match ws.index().resolve(&id) {
+        Some(path) => {
+            println!("{}", path.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        None if ws.index().is_tombstoned(&id) => {
+            eprintln!("colophon: {id} is tombstoned — its document was deleted");
+            Ok(ExitCode::FAILURE)
+        }
+        None => {
+            eprintln!("colophon: {id} is not in this workspace's registry");
+            Ok(ExitCode::FAILURE)
+        }
+    }
 }

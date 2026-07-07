@@ -52,12 +52,14 @@ pub mod workspace;
 
 pub use document::{Document, EmbedType};
 pub use error::{Error, Result};
-pub use fig::Format;
 pub use exec::block_on;
+pub use fig::Format;
 pub use fs::{Storage, StdFs};
+pub use identity::{Id, IdentityPolicy, Minter, Registration, Trigger};
+pub use index::{FileIndex, InMemoryIndex, IndexStore, NoIndex};
 pub use link::Link;
 pub use meta::{Mapping, Value};
 pub use relation::{Cardinality, Edge, Relation, RelationSet};
 pub use tree::{Node, NodeKind};
 pub use validate::Finding;
-pub use workspace::Workspace;
+pub use workspace::{Target, Workspace};
