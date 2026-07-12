@@ -202,6 +202,12 @@ pub enum Finding {
     /// `id`, or a registry rebuilt from a stale snapshot). Reconcilable by
     /// adopting the id into the registry.
     UnregisteredId { doc: PathBuf, frontmatter: Id },
+    /// A content document that exists on disk but nothing reachable from the
+    /// checked root links to it — the self-describing structure silently omits
+    /// it. The onboarding signal (DESIGN §8): a folder of notes that predates the
+    /// workspace, or a file that fell out of the tree. Diagnosis only for now;
+    /// adopting it under a parent is the eventual fix.
+    Orphan { doc: PathBuf },
 }
 
 impl fmt::Display for Finding {
@@ -264,6 +270,9 @@ impl fmt::Display for Finding {
                 "{}: unregistered id: frontmatter says id:{frontmatter} but the registry has no such entry",
                 doc.display()
             ),
+            Finding::Orphan { doc } => {
+                write!(f, "{}: orphan — on disk but not linked into the workspace", doc.display())
+            }
         }
     }
 }
@@ -366,11 +375,56 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// findings (unreadable document, duplicate containment, missing inverse)
     /// the walk raises from traversal state.
     pub async fn check(&self, start: impl AsRef<Path>) -> Result<Vec<Finding>> {
-        let (census, mut findings) = self.walk(start.as_ref()).await?;
+        let start = start.as_ref();
+        let Walk { census, mut findings, content_bodies } = self.walk(start).await?;
         for entry in &census {
             findings.extend(entry.finding());
         }
+        findings.extend(self.orphans(start, &census, &content_bodies).await?);
         Ok(findings)
+    }
+
+    /// The content documents on disk that nothing reachable from `start` links
+    /// to — [`Finding::Orphan`] for each. The reachable set is `start` itself
+    /// plus every path a census link resolves to (any relation, a body wikilink,
+    /// or an id through the registry); a case-mismatched link counts its *actual*
+    /// on-disk file as reached, so a file is never both case-mismatched and
+    /// orphaned. Findings are sorted by path for a stable report.
+    ///
+    /// Orphanhood is relative to `start`: run from the workspace root (the usual
+    /// case) it means "not in the workspace"; run from a subtree it means "not
+    /// reachable from here."
+    async fn orphans(
+        &self,
+        start: &Path,
+        census: &[CensusEntry],
+        content_bodies: &[PathBuf],
+    ) -> Result<Vec<Finding>> {
+        let mut reachable: BTreeSet<PathBuf> = BTreeSet::new();
+        reachable.insert(link::normalize(start));
+        // Prose bodies of separated nodes are linked via `content`, not a census
+        // edge — reach them so a separated workspace's bodies are not orphans.
+        reachable.extend(content_bodies.iter().cloned());
+        for entry in census {
+            match &entry.resolution {
+                Resolution::Path(p) | Resolution::Id { to: p, .. } => {
+                    reachable.insert(p.clone());
+                }
+                // The link is by the wrong case, but the file it *means* is on
+                // disk and thereby linked — reach the real name, not the miss.
+                Resolution::CaseMismatch { got, actual } => {
+                    reachable.insert(got.with_file_name(actual));
+                }
+                _ => {}
+            }
+        }
+        Ok(self
+            .content_documents()
+            .await?
+            .into_iter()
+            .filter(|doc| !reachable.contains(doc))
+            .map(|doc| Finding::Orphan { doc })
+            .collect())
     }
 
     /// Take a census of every forward link reachable from `start`: one
@@ -382,7 +436,7 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// is read from the documents, it is ground truth: a stored backlink index
     /// heals *toward* the census, never the reverse.
     pub async fn census(&self, start: impl AsRef<Path>) -> Result<Vec<CensusEntry>> {
-        Ok(self.walk(start.as_ref()).await?.0)
+        Ok(self.walk(start.as_ref()).await?.census)
     }
 
     /// The backlink map for the workspace reachable from `start`: every resolved
@@ -437,9 +491,13 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// link's resolution) in one pass. Frontmatter edges may be spanning and so
     /// drive descent, the single-parent check, and the inverse check; body
     /// wikilinks are always overlay references — censused, never spanning.
-    async fn walk(&self, start: &Path) -> Result<(Vec<CensusEntry>, Vec<Finding>)> {
+    async fn walk(&self, start: &Path) -> Result<Walk> {
         let mut census = Vec::new();
         let mut structural = Vec::new();
+        // Prose bodies reached through a separated node's `content` pointer.
+        // Kept out of the census (not a graph edge), but tracked so the orphan
+        // check does not mistake a linked body file for an unlinked one.
+        let mut content_bodies = Vec::new();
         let mut visited = BTreeSet::new();
         let mut queue = vec![link::normalize(start)];
 
@@ -570,13 +628,19 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 let target = link::resolve(&path, content);
                 let site = LinkSite::Relation("content".to_string());
                 match self.exact_name(&target).await {
-                    NameMatch::Exact => {}
-                    NameMatch::CaseOnly(actual) => structural.push(Finding::CaseMismatch {
-                        doc: path.clone(),
-                        site,
-                        target: content.to_string(),
-                        actual,
-                    }),
+                    NameMatch::Exact => content_bodies.push(target),
+                    NameMatch::CaseOnly(actual) => {
+                        // The linked body exists under a different case: record its
+                        // real name as reached (so it is not also an orphan), and
+                        // still flag the portability hazard.
+                        content_bodies.push(target.with_file_name(&actual));
+                        structural.push(Finding::CaseMismatch {
+                            doc: path.clone(),
+                            site,
+                            target: content.to_string(),
+                            actual,
+                        });
+                    }
                     NameMatch::None => structural.push(Finding::BrokenLink {
                         doc: path.clone(),
                         site,
@@ -585,7 +649,7 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 }
             }
         }
-        Ok((census, structural))
+        Ok(Walk { census, findings: structural, content_bodies })
     }
 
     /// Resolve one forward link (declared in the document at `source`) into a
@@ -695,6 +759,16 @@ enum NameMatch {
     Exact,
     CaseOnly(String),
     None,
+}
+
+/// The result of one spanning-tree [`walk`](Workspace::walk): the forward-link
+/// census, the structural findings raised from traversal state, and the prose
+/// body files reached through separated nodes' `content` pointers (tracked for
+/// the orphan check, deliberately absent from the census).
+struct Walk {
+    census: Vec<CensusEntry>,
+    findings: Vec<Finding>,
+    content_bodies: Vec<PathBuf>,
 }
 
 // These tests use YAML frontmatter fixtures, so they run under the `yaml` feature.
@@ -1116,6 +1190,50 @@ mod tests {
             .find(|f| matches!(f, Finding::BrokenLink { site: LinkSite::Body(_), .. }))
             .expect("the code fragment scanned as a broken body link");
         assert!(block_on(ws.suggest_fix(broken)).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unlinked_document_is_reported_as_an_orphan() {
+        let dir = tempdir("orphan");
+        // index links a.md; a.md links back. loose.md is on disk but nobody
+        // points at it — the onboarding signal.
+        write(&dir, "index.md", "---\ncontents:\n- a.md\n---\n");
+        write(&dir, "a.md", "---\npart_of: index.md\n---\n");
+        write(&dir, "notes/loose.md", "---\ntitle: Loose\n---\njust sitting here\n");
+        let ws = Workspace::builder(StdFs).root(&dir).build();
+        let findings = block_on(ws.check("index.md")).unwrap();
+
+        // loose.md is flagged…
+        assert!(
+            findings.iter().any(|f| matches!(f, Finding::Orphan { doc } if doc == &PathBuf::from("notes/loose.md"))),
+            "{findings:?}"
+        );
+        // …but the linked files (root + reachable child) are not.
+        assert!(
+            !findings.iter().any(|f| matches!(f, Finding::Orphan { doc }
+                if doc == &PathBuf::from("index.md") || doc == &PathBuf::from("a.md"))),
+            "linked files must not be orphans: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_case_mismatched_link_target_is_not_also_an_orphan() {
+        // docs/DESIGN.md is linked, but by the wrong case (docs/design.md). It
+        // must surface as a CaseMismatch, never doubly as an Orphan.
+        let dir = tempdir("orphan-case");
+        write(&dir, "index.md", "---\ncontents:\n- docs/design.md\n---\n");
+        write(&dir, "docs/DESIGN.md", "---\npart_of: ../index.md\n---\n");
+        let ws = Workspace::builder(StdFs).root(&dir).build();
+        let findings = block_on(ws.check("index.md")).unwrap();
+
+        assert!(
+            findings.iter().any(|f| matches!(f, Finding::CaseMismatch { .. })),
+            "{findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| matches!(f, Finding::Orphan { .. })),
+            "the case-mismatched file's real name is reached, so it is not an orphan: {findings:?}"
+        );
     }
 
     #[test]

@@ -305,8 +305,8 @@ not yet ported.
 | Workspace composition + builder | `workspace` | ✅ type-flipping builder |
 | Traverse (spanning tree from a root) | `tree` | ✅ `Workspace::tree`; missing/cyclic/unreadable targets are marked nodes |
 | Scan (directory-driven discovery) | — | ⏳ waits on `StructureSource` |
-| Mutation with link maintenance | `mutate` | ✅ first cut: `create`/`rename`/`delete` (parent entry, inverse links, re-relativization, labels kept; fig `Embed` edits). Remaining diaryx ops ⏳ |
-| Validation | `validate` | ✅ findings: broken link, case mismatch, duplicate containment, missing inverse, unreadable, malformed/dangling id, ambiguous alias, **id mismatch** + **unregistered id** (the frontmatter-storage reconcile pair). Autofix: missing inverse ✅; id mismatch → trust the registry (rewrite frontmatter) ✅; unregistered id → adopt into the registry ✅; body-link findings stay diagnosis-only |
+| Mutation with link maintenance | `mutate` | ✅ first cut: `create`/`rename`/`delete`/`adopt` (parent entry, inverse links, re-relativization, labels kept; fig `Embed` edits). `adopt` links an *existing* file both ways without touching its body — the onboarding complement of `create` (`docs/init-adoption.md`, Phase 1), driving `init --adopt` and the orphan autofix. Remaining diaryx ops ⏳ |
+| Validation | `validate` | ✅ findings: broken link, case mismatch, duplicate containment, missing inverse, unreadable, malformed/dangling id, ambiguous alias, **id mismatch** + **unregistered id** (the frontmatter-storage reconcile pair), **orphan** (a content document on disk nothing reachable links to — the onboarding signal, `docs/init-adoption.md`). Autofix: missing inverse ✅; id mismatch → trust the registry (rewrite frontmatter) ✅; unregistered id → adopt into the registry ✅; orphan + body-link findings stay diagnosis-only |
 | Storage adapter + executor | `fs`, `exec` | ✅ `StdFs` + dependency-free `block_on` |
 | Link text + path arithmetic | `link` | ✅ labeled links, resolve/relative, lexical normalize |
 | Single-document edits | `edit` | ✅ format-preserving `set`/`unset` over text |

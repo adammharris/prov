@@ -120,6 +120,12 @@ enum Command {
         /// but no tombstones) (default: frontmatter).
         #[arg(long, value_enum)]
         id_storage: Option<IdStorageArg>,
+        /// What to do with content documents already in the directory: `flat`
+        /// links each one under the new root; `none` leaves them unlinked. `mirror`
+        /// (directory-tree import) is not implemented yet. Omit to be asked on a
+        /// terminal (and to leave them unlinked otherwise).
+        #[arg(long, value_enum)]
+        adopt: Option<AdoptArg>,
         /// Accept every default without prompting.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -498,6 +504,19 @@ impl IdStorageArg {
     }
 }
 
+/// What `init` does with content documents already present in the directory
+/// (`docs/init-adoption.md`, Phase 1). `Flat` links each loose file directly
+/// under the new root; `None_` initializes but leaves them unlinked; `Mirror`
+/// (mirror the directory tree into the containment tree) is the Phase 2 import,
+/// not built yet — accepted as a flag so the error names it.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AdoptArg {
+    Flat,
+    #[value(name = "none")]
+    None_,
+    Mirror,
+}
+
 /// The syntactic wrapper `init` authors references in — the *first* style axis
 /// (`--wrapper`), chosen before the addressing (see `docs/reference-styles.md`,
 /// "pick the wrapper first, then the substyle").
@@ -667,6 +686,7 @@ fn main() -> ExitCode {
             link_style,
             identity,
             id_storage,
+            adopt,
             yes,
         } => cmd_init(
             dir.as_deref(),
@@ -680,6 +700,7 @@ fn main() -> ExitCode {
             link_style,
             identity,
             id_storage,
+            adopt,
             yes,
         ),
         Command::Set { file, key, value } => cmd_set(&file, &key, &value),
@@ -1003,6 +1024,129 @@ const ROOT_EXTS: &[&str] = &["md", "markdown", "dj", "djot", "html", "htm"];
 /// root is an `index.<meta-ext>` document, not an `index.<content-ext>` one.
 const META_EXTS: &[&str] = &["yaml", "yml", "json", "toml", "figl", "fig"];
 
+/// What `init` found in the target directory — the classification that decides
+/// how it proceeds (see `docs/init-adoption.md`). Computed before the interview,
+/// over the *content* documents (`ROOT_EXTS`) present, plus the top-level markers
+/// that signal an already-initialized workspace.
+enum DirState {
+    /// Empty, or only files colophon doesn't treat as content documents (images,
+    /// code, data). `init` proceeds exactly as on a fresh directory.
+    Greenfield,
+    /// Content documents are present but none declares a containment link — a
+    /// loose folder of notes. `init` can proceed, leaving them unlinked (a future
+    /// `adopt` pulls them in); `docs` are their workspace-relative paths.
+    LooseContent { docs: Vec<PathBuf> },
+    /// At least one document declares `contents`/`part_of` — an existing
+    /// colophon/diaryx-shaped tree. `init` must not mint a competing root; `root`
+    /// is the detected root candidate (a document with metadata and no `part_of`),
+    /// if unambiguous.
+    Structured { docs: Vec<PathBuf>, root: Option<PathBuf> },
+    /// A colophon root or config document is already present — this is an
+    /// initialized workspace. `marker` is the file that gave it away.
+    Initialized { marker: PathBuf },
+}
+
+/// A content document found while classifying a directory: its path (relative to
+/// the init directory) and the two frontmatter facts `init` branches on.
+struct FoundDoc {
+    rel: PathBuf,
+    /// Declares a containment link (`contents`/`part_of`) — part of a tree.
+    structural: bool,
+    /// Has metadata and no `part_of` — a candidate workspace root.
+    root_candidate: bool,
+}
+
+/// Classify `dir` for `init`: detect an already-initialized workspace (an
+/// `index.*` root or a `colophon.*` config beside it), else scan the content
+/// documents present and decide loose-vs-structured-vs-greenfield.
+fn classify_dir(dir: &Path) -> DirState {
+    // An existing root (`index.<content|meta-ext>`) or config sidecar
+    // (`colophon.<meta-ext>`) at the top level means this is already a workspace.
+    for ext in ROOT_EXTS.iter().chain(META_EXTS) {
+        let marker = dir.join(format!("index.{ext}"));
+        if marker.exists() {
+            return DirState::Initialized { marker };
+        }
+    }
+    for ext in META_EXTS {
+        let marker = dir.join(format!("{CONFIG_STEM}.{ext}"));
+        if marker.exists() {
+            return DirState::Initialized { marker };
+        }
+    }
+
+    let mut docs = Vec::new();
+    scan_docs(dir, Path::new(""), &mut docs);
+    if docs.is_empty() {
+        return DirState::Greenfield;
+    }
+    if docs.iter().any(|d| d.structural) {
+        let root = pick_root_candidate(&docs);
+        DirState::Structured { docs: docs.into_iter().map(|d| d.rel).collect(), root }
+    } else {
+        DirState::LooseContent { docs: docs.into_iter().map(|d| d.rel).collect() }
+    }
+}
+
+/// Recursively collect content documents under `dir` (rooted at workspace-relative
+/// `rel`), reading each one's frontmatter for the structural / root-candidate
+/// facts. Hidden entries (`.`-prefixed) are skipped, mirroring the library's
+/// scans; unreadable or unparsable files count as plain (non-structural) content.
+fn scan_docs(dir: &Path, rel: &Path, out: &mut Vec<FoundDoc>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let child = entry.path();
+        let child_rel = rel.join(name);
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            scan_docs(&child, &child_rel, out);
+            continue;
+        }
+        let is_content = child
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| ROOT_EXTS.contains(&e.to_ascii_lowercase().as_str()));
+        if !is_content {
+            continue;
+        }
+        // Diaryx vocabulary: `contents` (down) / `part_of` (up). Matches
+        // `relation_set()`; a configurable vocabulary would read the names here.
+        let (structural, root_candidate) = std::fs::read_to_string(&child)
+            .ok()
+            .and_then(|t| Document::parse(&child_rel, &t).ok())
+            .filter(Document::has_meta)
+            .map(|doc| {
+                let has_part_of = doc.meta.get("part_of").is_some();
+                let structural = has_part_of || doc.meta.get("contents").is_some();
+                (structural, !has_part_of)
+            })
+            .unwrap_or((false, false));
+        out.push(FoundDoc { rel: child_rel, structural, root_candidate });
+    }
+}
+
+/// Pick the workspace root from a set of found documents: a `readme` stem wins
+/// (an `index` would have been caught as already-initialized), else a lone
+/// root-candidate. Two-plus candidates are ambiguous — `None`, and `init` won't
+/// guess.
+fn pick_root_candidate(docs: &[FoundDoc]) -> Option<PathBuf> {
+    let candidates: Vec<&PathBuf> = docs.iter().filter(|d| d.root_candidate).map(|d| &d.rel).collect();
+    let stem_is = |p: &Path, want: &str| {
+        p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case(want))
+    };
+    candidates
+        .iter()
+        .find(|p| stem_is(p, "index"))
+        .or_else(|| candidates.iter().find(|p| stem_is(p, "readme")))
+        .map(|p| (*p).clone())
+        .or_else(|| (candidates.len() == 1).then(|| candidates[0].clone()))
+}
+
 /// Initialize a workspace: write a self-describing root the other commands can
 /// discover. Each field comes from its flag if given; otherwise, on a terminal
 /// (and without `--yes`), the user is prompted, and in every other case the
@@ -1029,6 +1173,7 @@ fn cmd_init(
     link_style: Option<LinkStyleArg>,
     identity: Option<IdentityArg>,
     id_storage: Option<IdStorageArg>,
+    adopt: Option<AdoptArg>,
     yes: bool,
 ) -> CmdResult {
     let dir = match dir {
@@ -1040,22 +1185,98 @@ fn cmd_init(
     // both for the default title and the confirmation line.
     let dir = dir.canonicalize()?;
 
-    // Bail before prompting if this directory is already a workspace — a root
-    // written by any content grammar (combined) or any metadata format (separate).
-    for ext in ROOT_EXTS.iter().chain(META_EXTS) {
-        let existing = dir.join(format!("index.{ext}"));
-        if existing.exists() {
+    // Prompt only on a real terminal and only when `--yes` wasn't passed.
+    let interactive = !yes && std::io::stdin().is_terminal();
+
+    if adopt == Some(AdoptArg::Mirror) {
+        return Err("`--adopt mirror` (directory-tree import) isn't implemented yet; \
+             use `--adopt flat` to link the existing files directly under the root"
+            .into());
+    }
+
+    // Inspect the directory before prompting, and refuse or warn as its contents
+    // warrant (docs/init-adoption.md): never overwrite an initialized workspace,
+    // never mint a root that competes with an existing tree, and never silently
+    // orphan a folder of notes. When loose content is present, decide whether to
+    // adopt it (link it under the new root) — the flag wins, else the terminal is
+    // asked.
+    let mut loose_docs: Vec<PathBuf> = Vec::new();
+    let mut do_adopt = false;
+    match classify_dir(&dir) {
+        DirState::Greenfield => {}
+        DirState::Initialized { marker } => {
             return Err(format!(
                 "{} already exists — this looks like an initialized workspace",
-                existing.display()
+                marker.display()
             )
             .into());
+        }
+        // An existing containment tree: minting `index.md` here would create a
+        // second root. Adopting a tree (attaching config, linking loose files)
+        // is not built yet, so refuse with the path that is — `colophon config`
+        // attaches policy to the existing root.
+        DirState::Structured { docs, root } => {
+            let root_note = root
+                .as_ref()
+                .map(|r| format!(" (root: {})", r.display()))
+                .unwrap_or_default();
+            return Err(format!(
+                "this directory already holds a structured workspace{root_note}: \
+                 {} document(s) declare containment links, so `init` would mint a \
+                 competing root.\n\
+                 To attach colophon configuration to the existing tree, run \
+                 `colophon config <key> <value>` from here.",
+                docs.len()
+            )
+            .into());
+        }
+        // Loose notes with no tree: safe to initialize over. Adopt them (link each
+        // under the new root) or leave them unlinked — the flag decides, else the
+        // terminal is asked, else (non-interactive) they are left unlinked with a
+        // note, and `--yes` without a decision refuses rather than guess.
+        DirState::LooseContent { docs } => {
+            let n = docs.len();
+            match adopt {
+                Some(AdoptArg::Flat) => do_adopt = true,
+                Some(AdoptArg::None_) => {}
+                Some(AdoptArg::Mirror) => unreachable!("handled above"),
+                None if interactive => {
+                    match cliclack::select(format!(
+                        "{n} existing document(s) here aren't part of a colophon workspace — what should init do?"
+                    ))
+                    .item("adopt", "Adopt them", "link each one under the new root")
+                    .item("leave", "Leave unlinked", "initialize anyway; colophon check will list them")
+                    .item("cancel", "Cancel", "write nothing")
+                    .interact()?
+                    {
+                        "adopt" => do_adopt = true,
+                        "leave" => {}
+                        _ => {
+                            println!("cancelled — nothing written");
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                    }
+                }
+                None if yes => {
+                    return Err(format!(
+                        "{n} existing document(s) here aren't linked into a workspace; \
+                         pass `--adopt flat` to link them under the root, or `--adopt none` \
+                         to initialize and leave them unlinked."
+                    )
+                    .into());
+                }
+                None => {
+                    eprintln!(
+                        "colophon: note — {n} existing document(s) here will not be linked \
+                         into the workspace (colophon check will list them; `--adopt flat` links them)."
+                    );
+                }
+            }
+            loose_docs = docs;
         }
     }
 
     let default_title = link::path_to_title(&dir);
-    // Prompt only on a real terminal and only when `--yes` wasn't passed.
-    let interactive = !yes && std::io::stdin().is_terminal();
     // Two prompts are conditional but still count toward "will we prompt?", so
     // the intro/outro stay paired with at least one question: the references
     // prompt is skipped when identity is off (path is forced), and the path-format
@@ -1283,6 +1504,37 @@ fn cmd_init(
     }
     std::fs::write(dir.join(&config_rel), meta::serialize_mapping(&config_map, meta_format)?)?;
 
+    // Phase 1 flat adoption (docs/init-adoption.md): link each pre-existing loose
+    // document under the freshly-written root, both directions, in the workspace's
+    // reference style. Runs over the workspace we just wrote, so a registry is
+    // bootstrapped first when the links will mint IDs (as `new` does).
+    let mut adopt_note = String::new();
+    if do_adopt && !loose_docs.is_empty() {
+        let mut ctx = Ctx {
+            root_dir: dir.clone(),
+            root_doc: PathBuf::from(&root_name),
+            registry: None,
+            config: ws_config.clone(),
+        };
+        let link_registers = ctx.config.reference_style().registers()
+            || ctx.config.resolved_relation_styles().values().any(|s| s.registers());
+        let mints = (link_registers && ctx.config.identity.fires_on(Trigger::Link))
+            || ctx.config.identity.fires_on(Trigger::Create);
+        if mints {
+            ensure_registry(&mut ctx)?;
+        }
+        let mut ws = workspace(&ctx)?;
+        let mut adopted = 0usize;
+        for doc in &loose_docs {
+            match block_on(ws.adopt(doc, &ctx.root_doc)) {
+                Ok(()) => adopted += 1,
+                Err(e) => eprintln!("colophon: could not adopt {}: {e}", doc.display()),
+            }
+        }
+        persist(&ctx, &mut ws)?;
+        adopt_note = format!("\nadopted {adopted} existing document(s) under {root_name}");
+    }
+
     let author_note = author.as_deref().map(|a| format!(", author {a}")).unwrap_or_default();
     let (embed_label, _) = embed_labels(embed);
     // The path format only appears when a by-path reference is authored — it is
@@ -1311,10 +1563,13 @@ fn cmd_init(
     );
     let next = format!("next: colophon new <path> --parent {root_name}");
     if prompting {
-        cliclack::outro(format!("initialized {}\n{details}\n{next}", dir.display()))?;
+        cliclack::outro(format!("initialized {}\n{details}{adopt_note}\n{next}", dir.display()))?;
     } else {
         println!("initialized {}", dir.display());
         for line in details.lines() {
+            println!("  {line}");
+        }
+        for line in adopt_note.lines().filter(|l| !l.is_empty()) {
             println!("  {line}");
         }
         println!("{next}");
@@ -1607,7 +1862,7 @@ fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {
     let mut ws = workspace(&ctx)?;
     let findings = block_on(ws.check(&root))?;
     if fix {
-        return cmd_check_fix(&mut ctx, &mut ws, &findings);
+        return cmd_check_fix(&mut ctx, &mut ws, &root, &findings);
     }
     for finding in &findings {
         println!("{finding}");
@@ -1628,12 +1883,41 @@ fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {
 fn cmd_check_fix(
     ctx: &mut Ctx,
     ws: &mut Workspace<StdFs, Minter, FileIndex>,
+    root: &Path,
     findings: &[colophon::Finding],
 ) -> CmdResult {
     let mut applied = 0usize;
     let mut needs_attention = 0usize;
     let mut apply_all = false;
     for finding in findings {
+        // An orphan has no metadata-only `Fix` (nothing in the document is
+        // wrong); repairing it means *adopting* it under a parent. Offer the
+        // workspace root as that parent — the same flat adoption `init --adopt`
+        // performs — since a batch fix can't ask which subtree it belongs to.
+        if let colophon::Finding::Orphan { doc } = finding {
+            println!("⚑  {finding}");
+            println!("   → adopt {} under {}", doc.display(), root.display());
+            let apply = apply_all
+                || match prompt("   adopt? [y]es / [n]o / [a]ll / [q]uit: ")?.as_str() {
+                    "a" | "all" => {
+                        apply_all = true;
+                        true
+                    }
+                    "y" | "yes" => true,
+                    "q" | "quit" => {
+                        println!("stopped; {applied} fix(es) applied");
+                        break;
+                    }
+                    _ => false,
+                };
+            if apply {
+                block_on(ws.adopt(doc, root))?;
+                applied += 1;
+            } else {
+                needs_attention += 1;
+            }
+            continue;
+        }
         let Some(fix) = block_on(ws.suggest_fix(finding))? else {
             println!("•  {finding}");
             needs_attention += 1;
@@ -1660,8 +1944,11 @@ fn cmd_check_fix(
         }
     }
     // A fix may have registered an ID (an adopted `id`, or an id-link back-link):
-    // make sure a registry exists and persist the identity changes to disk.
-    if applied > 0 {
+    // make sure a registry exists and persist the identity changes to disk. Gate
+    // on the index actually having changed, so a purely path-based fix (a
+    // path-style inverse, adopting an orphan by path) does not bootstrap an empty
+    // registry document as a side effect.
+    if applied > 0 && ws.index().is_dirty() {
         ensure_registry(ctx)?;
         persist(ctx, ws)?;
     }

@@ -277,6 +277,53 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
         Ok(ids)
     }
 
+    /// Every content document (Markdown/Djot/HTML) under the root, as sorted
+    /// workspace-relative paths — the on-disk population the orphan check diffs
+    /// against what the spanning tree reaches (DESIGN §8). Deliberately restricted
+    /// to *content* documents: whole-file metadata sidecars (a config or registry
+    /// document, a stray `.yaml`) are not prose a user orphans, so they are not
+    /// candidates. A flat filesystem scan (hidden entries skipped), independent of
+    /// link resolution, like the title/id scans beside it.
+    pub async fn content_documents(&self) -> Result<Vec<PathBuf>> {
+        let mut docs = Vec::new();
+        self.scan_content_dir(PathBuf::new(), &mut docs).await?;
+        docs.sort();
+        Ok(docs)
+    }
+
+    /// Recursively collect content-document paths under `rel_dir`. Same walk as
+    /// [`scan_ids_dir`](Self::scan_ids_dir); unreadable/hidden entries are skipped.
+    fn scan_content_dir<'a>(
+        &'a self,
+        rel_dir: PathBuf,
+        docs: &'a mut Vec<PathBuf>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let Ok(entries) = self.fs.read_dir(&self.root.join(&rel_dir)).await else {
+                return Ok(());
+            };
+            for entry in entries {
+                let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                    continue;
+                };
+                if name.starts_with('.') {
+                    continue;
+                }
+                let rel = if rel_dir.as_os_str().is_empty() {
+                    PathBuf::from(&name)
+                } else {
+                    rel_dir.join(&name)
+                };
+                if entry.file_type().is_dir() {
+                    self.scan_content_dir(rel, docs).await?;
+                } else if entry.file_type().is_file() && ContentFormat::from_extension(&rel).is_some() {
+                    docs.push(rel);
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Recursively collect self-stored `id` fields under `rel_dir`. Same walk as
     /// [`scan_titles`](Self::scan_titles); unreadable/hidden entries are skipped.
     fn scan_ids_dir<'a>(
