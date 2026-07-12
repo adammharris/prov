@@ -9,8 +9,8 @@
 //! serves a Diaryx-style vault and an Obsidian-style one purely by what the
 //! config document declares:
 //!
-//! - [`WorkspaceConfig::diaryx`] — path links, identity off (pure paths).
-//! - [`WorkspaceConfig::obsidian`] — stable IDs minted lazily (registry +
+//! - [`WorkspaceConfig::paths_only`] — path links, identity off (pure paths).
+//! - [`WorkspaceConfig::stable_ids`] — stable IDs minted lazily (registry +
 //!   backlinks), portable links for the path-based parts.
 //!
 //! Each field maps to a config-document key ([`apply`](WorkspaceConfig::apply) /
@@ -72,7 +72,7 @@ impl Default for WorkspaceConfig {
 impl WorkspaceConfig {
     /// Diaryx-style: path links, no identity — nothing mints an ID, so the
     /// workspace is addressed purely by path (the Adam's-Archive shape).
-    pub fn diaryx() -> Self {
+    pub fn paths_only() -> Self {
         Self {
             link_format: LinkStyle::MarkdownRoot,
             identity: Registration::OFF,
@@ -86,7 +86,7 @@ impl WorkspaceConfig {
     /// Obsidian-style: stable IDs minted lazily (link-by-id or publish), and
     /// colophon authors structural links *by* id — so a move rewrites nothing,
     /// the registry keeps them resolving. Portable path links for the rest.
-    pub fn obsidian() -> Self {
+    pub fn stable_ids() -> Self {
         Self {
             link_format: LinkStyle::MarkdownRoot,
             identity: Registration::LAZY,
@@ -207,10 +207,10 @@ mod tests {
     #[test]
     fn presets_encode_the_two_styles() {
         // Diaryx: no identity, path links. Obsidian: identity + id-linking.
-        assert_eq!(WorkspaceConfig::diaryx().identity, Registration::OFF);
-        assert!(!WorkspaceConfig::diaryx().id_links);
-        assert!(WorkspaceConfig::obsidian().identity.fires_on(Trigger::Link));
-        assert!(WorkspaceConfig::obsidian().id_links);
+        assert_eq!(WorkspaceConfig::paths_only().identity, Registration::OFF);
+        assert!(!WorkspaceConfig::paths_only().id_links);
+        assert!(WorkspaceConfig::stable_ids().identity.fires_on(Trigger::Link));
+        assert!(WorkspaceConfig::stable_ids().id_links);
     }
 
     #[test]

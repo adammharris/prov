@@ -92,39 +92,45 @@ $ colophon init my-vault
 │
 ◇  Title ·············· My Vault
 ◇  Author ············· (blank)
-◇  Metadata format ···· YAML
 ◇  Content format ····· Markdown
+◇  Embed type ········· Character delimiters
+◇  Config language ···· YAML
 ◇  Link style ········· Markdown, workspace-absolute
 ◇  Identity ··········· On demand — an ID on link-by-id or publish
 ◇  Links between documents ··· By path
 │
 └  initialized /home/you/my-vault
    root: index.md — My Vault
-   config: colophon.yaml — metadata yaml, content markdown, link style markdown_root, identity lazy, links path
+   config: colophon.yaml — content markdown, embed delimited (character delimiters), language yaml, link style markdown_root, identity lazy, links path
    next: colophon new <path> --parent index.md
 ```
 
 Identity is **two independent choices** (see [§9](#9-stable-ids-optional)): when a
 document earns a stable ID, and whether colophon writes its structural links by
 ID or by path. The second prompt only appears when identity isn't off. The
-choices:
+choices, in the order they're asked:
 
-| Prompt              | Default                     | Options                                              |
-| ------------------- | --------------------------- | ---------------------------------------------------- |
-| **Title**           | the directory's name        | any text                                             |
-| **Author**          | omitted                     | any text, or blank to leave it out                   |
-| **Metadata format** | `yaml` (`---` frontmatter)  | `yaml`, `json` (`;;;`), `fig` (```` ```fig ````)     |
-| **Content format**  | `markdown`                  | `markdown` (`.md`), `djot` (`.dj`), `html` (`.html`) |
-| **Link style**      | `markdown-root`             | see [§10](#10-workspace-config)                      |
-| **Identity**        | `lazy` (on demand)          | `off` (paths only), `lazy`, `eager` — see [§9](#9-stable-ids-optional) |
-| **Links between documents** | `path`              | `path`, `id` (survive moves) — shown only when identity ≠ `off` |
+| Prompt                       | Default                                    | Options                                              |
+| ---------------------------- | ------------------------------------------- | ---------------------------------------------------- |
+| **Title**                    | the directory's name                       | any text                                             |
+| **Author**                   | omitted                                     | any text, or blank to leave it out                   |
+| **Content format**           | `markdown`                                  | `markdown` (`.md`), `djot` (`.dj`), `html` (`.html`) |
+| **Embed type**               | the first style the content format offers   | `delimited`, `code-block`, `html-script`, `html-code`, `separate` — narrowed by content format (e.g. only Markdown offers `delimited`) |
+| **Config language**          | `yaml`                                      | `yaml`, `json`, `toml`, `fig` — narrowed by embed type (`fig` has no `delimited` form) |
+| **Link style**               | `markdown-root`                             | see [§10](#10-workspace-config)                      |
+| **Identity**                 | `lazy` (on demand)                          | `off` (paths only), `lazy`, `eager` — see [§9](#9-stable-ids-optional) |
+| **Links between documents**  | `path`                                      | `path`, `id` (survive moves) — shown only when identity ≠ `off` |
 
 The root-shaping choices come first; the rest are **workspace
 preferences**. All of them are written into a config document (`colophon.yaml`,
-or `colophon.json` / `colophon.figl` if you chose that metadata format — linked
+or `colophon.json` / `colophon.figl` if you chose that config language — linked
 from the root) so the workspace records how it wants to be authored — see
 [§10](#10-workspace-config). The **content format** also sets the root file's
 extension and body grammar; `twig` (colophon's body parser) handles all three.
+The **embed type** picks the carrier that config language is written in — frontmatter
+delimiters, a fenced code block, an HTML data island, or a separate sidecar
+document — and gates which config languages make sense (a fenced block can be
+any language; bare delimiters only suit YAML/TOML/JSON, not `fig`).
 
 Every choice is also a flag, so you can skip the prompts. Pass `--yes` (`-y`) to
 take all defaults, or set some and be prompted for the rest:
@@ -133,12 +139,13 @@ take all defaults, or set some and be prompted for the rest:
 $ colophon init my-vault --content djot --identity lazy --links id --yes
 initialized /home/you/my-vault
   root: index.dj — My Vault
-  config: colophon.yaml — metadata yaml, content djot, link style markdown_root, identity lazy, links id
+  config: colophon.yaml — content djot, embed code_block (typed code block), language yaml, link style markdown_root, identity lazy, links id
 next: colophon new <path> --parent index.dj
 ```
 
-Flags: `--title`, `--author`, `--meta <yaml|json|fig>`, `--content
-<markdown|djot|html>`, `--link-style <markdown-root|markdown-relative|plain-relative|plain-canonical>`,
+Flags: `--title`, `--author`, `--content <markdown|djot|html>`, `--embed
+<delimited|code-block|html-script|html-code|separate>`, `--meta <yaml|json|toml|fig>`,
+`--link-style <markdown-root|markdown-relative|plain-relative|plain-canonical>`,
 `--identity <off|lazy|eager>`, `--links <path|id>`, `--yes`. (`--links id` needs
 identity, so it's rejected with `--identity off`.) With no arguments, `init` initializes
 the current directory. It refuses to run where a workspace root already exists,
@@ -400,7 +407,8 @@ The knobs:
 | `link_format`   | `markdown_root`, `markdown_relative`, `plain_relative`, `plain_canonical` | how colophon writes path links     |
 | `identity`      | `off`, `lazy`, `eager`                                        | when a document earns a stable ID                    |
 | `id_links`      | `true`/`false`                                               | author structural links *by ID* instead of by path   |
-| `embed_format`  | `yaml`, `json`, `fig`                                         | metadata format for newly created documents          |
+| `embed_format`  | `yaml`, `json`, `toml`, `fig`                                 | config language for newly created documents          |
+| `embed_type`    | `delimited`, `code_block`, `html_script`, `html_code`, `separate` | how that config language is embedded — delimiters, a fenced block, an HTML island, or a sidecar |
 | `content_format`| `markdown`, `djot`, `html`                                   | the body grammar the workspace is authored in        |
 
 The two `init` identity prompts map straight onto these keys: **Identity** sets

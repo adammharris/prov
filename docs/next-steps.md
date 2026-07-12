@@ -115,7 +115,7 @@ defaults. `link_format` precedence: config doc > root frontmatter (diaryx compat
 - ✅ `config` relation + `config_path`/`config_get`; CLI `config` get/set/print
   with `ensure_config` bootstrap; autofix + `find_root` read from it.
 - ✅ **Typed `WorkspaceConfig`** (`config.rs`): `link_format`, `identity`,
-  `id_links`, `embed_format`, with `diaryx()`/`obsidian()` presets and
+  `id_links`, `embed_format`, with `paths_only()`/`stable_ids()` presets and
   `apply`/`from_meta`/`to_mapping` round-trip. The CLI builds the whole
   workspace from it, so **Diaryx and Obsidian are each just a config** —
   verified: `colophon id` refuses under Diaryx / mints under Obsidian;
