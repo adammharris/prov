@@ -97,9 +97,15 @@ enum Command {
         /// How path links are written (default: markdown-root).
         #[arg(long, value_enum)]
         link_style: Option<LinkStyleArg>,
-        /// Identity model: diaryx (paths only) or obsidian (stable IDs) (default: diaryx).
+        /// When documents earn a stable ID: off (paths only), lazy (on
+        /// link-by-id or publish), or eager (at creation) (default: lazy).
         #[arg(long, value_enum)]
         identity: Option<IdentityArg>,
+        /// How colophon writes the links it authors: by path, or by stable id
+        /// (requires `--identity` ≠ off) (default: path). Distinct from
+        /// `--link-style`, which sets how *path* links are formatted.
+        #[arg(long, value_enum)]
+        links: Option<LinkKind>,
         /// Accept every default without prompting.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -418,30 +424,45 @@ impl From<LinkStyleArg> for LinkStyle {
     }
 }
 
-/// The two identity models `init` offers, each a preset over the config's
-/// `identity` + `id_links` knobs: **Diaryx** is paths-only (no IDs), **Obsidian**
-/// mints stable IDs lazily and authors links by ID (so moves rewrite nothing).
+/// When a document earns a stable ID — the `identity` config key, one of the
+/// two independent identity axes `init` asks about. `Off` is paths-only; `Lazy`
+/// mints on a durable reference (link-by-id or publish); `Eager` mints every
+/// document at creation. The spellings match the config value ([`registration_from_str`]).
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum IdentityArg {
-    Diaryx,
-    Obsidian,
+    Off,
+    Lazy,
+    Eager,
 }
 
 impl IdentityArg {
-    /// `(registration triggers, whether colophon authors id links)`.
-    fn to_config(self) -> (Registration, bool) {
+    /// The registration trigger set this identity policy selects.
+    fn registration(self) -> Registration {
         match self {
-            IdentityArg::Diaryx => (Registration::OFF, false),
-            IdentityArg::Obsidian => (Registration::LAZY, true),
+            IdentityArg::Off => Registration::OFF,
+            IdentityArg::Lazy => Registration::LAZY,
+            IdentityArg::Eager => Registration::EAGER,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            IdentityArg::Diaryx => "diaryx",
-            IdentityArg::Obsidian => "obsidian",
+            IdentityArg::Off => "off",
+            IdentityArg::Lazy => "lazy",
+            IdentityArg::Eager => "eager",
         }
     }
+}
+
+/// How colophon authors the structural links it writes — the `id_links` config
+/// key, the *second* identity axis. `Path` writes readable path links (rewritten
+/// on move); `Id` writes `colophon:<id>` targets that survive moves untouched.
+/// Only meaningful when identity can mint on a link, so `init` gates the prompt
+/// on `--identity` ≠ off.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LinkKind {
+    Path,
+    Id,
 }
 
 impl From<MetaFormat> for Format {
@@ -467,8 +488,8 @@ fn main() -> ExitCode {
         Command::Get { file, key } => cmd_get(&file, &key),
         Command::Body { file } => cmd_body(&file),
         Command::Render { file } => cmd_render(&file),
-        Command::Init { dir, title, author, meta, embed, content, link_style, identity, yes } => {
-            cmd_init(dir.as_deref(), title, author, meta, embed, content, link_style, identity, yes)
+        Command::Init { dir, title, author, meta, embed, content, link_style, identity, links, yes } => {
+            cmd_init(dir.as_deref(), title, author, meta, embed, content, link_style, identity, links, yes)
         }
         Command::Set { file, key, value } => cmd_set(&file, &key, &value),
         Command::Unset { file, key } => cmd_unset(&file, &key),
@@ -746,6 +767,7 @@ fn cmd_init(
     content: Option<ContentLang>,
     link_style: Option<LinkStyleArg>,
     identity: Option<IdentityArg>,
+    links: Option<LinkKind>,
     yes: bool,
 ) -> CmdResult {
     let dir = match dir {
@@ -773,6 +795,10 @@ fn cmd_init(
     let default_title = link::path_to_title(&dir);
     // Prompt only on a real terminal and only when `--yes` wasn't passed.
     let interactive = !yes && std::io::stdin().is_terminal();
+    // The link-authoring prompt only appears when identity isn't off, so it only
+    // counts toward "will we prompt?" in that case — keeping intro/outro paired
+    // with at least one real question.
+    let links_prompt_possible = links.is_none() && identity != Some(IdentityArg::Off);
     let prompting = interactive
         && (title.is_none()
             || author.is_none()
@@ -780,7 +806,8 @@ fn cmd_init(
             || embed.is_none()
             || meta.is_none()
             || link_style.is_none()
-            || identity.is_none());
+            || identity.is_none()
+            || links_prompt_possible);
     if prompting {
         cliclack::intro("colophon init")?;
     }
@@ -866,21 +893,46 @@ fn cmd_init(
             .interact()?,
         None => LinkStyleArg::MarkdownRoot,
     };
+    // Identity is two independent axes (DESIGN §4). First: *when* a document
+    // earns a stable ID. Default lazy, matching `WorkspaceConfig::default()`.
     let identity = match identity {
         Some(i) => i,
         None if interactive => cliclack::select("Identity")
-            .initial_value(IdentityArg::Diaryx)
-            .item(IdentityArg::Diaryx, "Diaryx — paths only", "no IDs; plain-path links")
-            .item(IdentityArg::Obsidian, "Obsidian — stable IDs", "id links survive moves")
+            .initial_value(IdentityArg::Lazy)
+            .item(IdentityArg::Lazy, "On demand", "an ID is minted when a document is linked by ID or published")
+            .item(IdentityArg::Off, "None", "documents are addressed by path only")
+            .item(IdentityArg::Eager, "From creation", "every document gets an ID when it is created")
             .interact()?,
-        None => IdentityArg::Diaryx,
+        None => IdentityArg::Lazy,
+    };
+    // Second: whether colophon *authors* links by ID. Only meaningful when an ID
+    // can be minted on a link, so with identity off it is forced to path links
+    // and the prompt is skipped. A `--links id` against `--identity off` is an
+    // explicit contradiction — surface it rather than silently ignoring it.
+    let id_links = if identity == IdentityArg::Off {
+        if links == Some(LinkKind::Id) {
+            return Err("`--links id` needs identity to mint IDs (try `--identity lazy`)".into());
+        }
+        false
+    } else {
+        match links {
+            Some(l) => l == LinkKind::Id,
+            None if interactive => {
+                cliclack::select("Links between documents")
+                    .initial_value(LinkKind::Path)
+                    .item(LinkKind::Path, "By path", "readable links; colophon rewrites them when a file moves")
+                    .item(LinkKind::Id, "By stable ID", "links never change; the registry tracks where each file lives")
+                    .interact()?
+                    == LinkKind::Id
+            }
+            None => false,
+        }
     };
 
     // Assemble the workspace preferences these choices encode.
-    let (registration, id_links) = identity.to_config();
     let ws_config = WorkspaceConfig {
         link_format: link_style.into(),
-        identity: registration,
+        identity: identity.registration(),
         id_links,
         default_embed_format: meta.into(),
         embed_style: embed,
@@ -949,13 +1001,14 @@ fn cmd_init(
     let (embed_label, _) = embed_labels(embed);
     let details = format!(
         "root: {root_name} — {title}{author_note}\n\
-         config: {config_name} — content {}, embed {} ({}), language {}, link style {}, identity {}",
+         config: {config_name} — content {}, embed {} ({}), language {}, link style {}, identity {}, links {}",
         content.label(),
         embed.as_config_str(),
         embed_label.to_lowercase(),
         meta.label(),
         ws_config.link_format.as_config_str(),
         identity.label(),
+        if id_links { "id" } else { "path" },
     );
     let next = format!("next: colophon new <path> --parent {root_name}");
     if prompting {

@@ -83,8 +83,8 @@ it by full path. Every example below uses the command name `colophon`.
 ## 3. Create a workspace
 
 `init` sets up a workspace: a self-describing root document plus a config
-document that records your preferences. On a terminal it walks you through six
-choices:
+document that records your preferences. On a terminal it walks you through a
+handful of choices:
 
 ```console
 $ colophon init my-vault
@@ -95,15 +95,19 @@ $ colophon init my-vault
 ◇  Metadata format ···· YAML
 ◇  Content format ····· Markdown
 ◇  Link style ········· Markdown, workspace-absolute
-◇  Identity ··········· Diaryx — paths only
+◇  Identity ··········· On demand — an ID on link-by-id or publish
+◇  Links between documents ··· By path
 │
 └  initialized /home/you/my-vault
    root: index.md — My Vault
-   config: colophon.yaml — metadata yaml, content markdown, link style markdown_root, identity diaryx
+   config: colophon.yaml — metadata yaml, content markdown, link style markdown_root, identity lazy, links path
    next: colophon new <path> --parent index.md
 ```
 
-The six choices:
+Identity is **two independent choices** (see [§9](#9-stable-ids-optional)): when a
+document earns a stable ID, and whether colophon writes its structural links by
+ID or by path. The second prompt only appears when identity isn't off. The
+choices:
 
 | Prompt              | Default                     | Options                                              |
 | ------------------- | --------------------------- | ---------------------------------------------------- |
@@ -112,9 +116,10 @@ The six choices:
 | **Metadata format** | `yaml` (`---` frontmatter)  | `yaml`, `json` (`;;;`), `fig` (```` ```fig ````)     |
 | **Content format**  | `markdown`                  | `markdown` (`.md`), `djot` (`.dj`), `html` (`.html`) |
 | **Link style**      | `markdown-root`             | see [§10](#10-workspace-config)                      |
-| **Identity**        | `diaryx` (paths only)       | `diaryx`, `obsidian` (stable IDs — see [§9](#9-stable-ids-optional)) |
+| **Identity**        | `lazy` (on demand)          | `off` (paths only), `lazy`, `eager` — see [§9](#9-stable-ids-optional) |
+| **Links between documents** | `path`              | `path`, `id` (survive moves) — shown only when identity ≠ `off` |
 
-The first four shape the **root document**; the last two are **workspace
+The root-shaping choices come first; the rest are **workspace
 preferences**. All of them are written into a config document (`colophon.yaml`,
 or `colophon.json` / `colophon.figl` if you chose that metadata format — linked
 from the root) so the workspace records how it wants to be authored — see
@@ -125,16 +130,17 @@ Every choice is also a flag, so you can skip the prompts. Pass `--yes` (`-y`) to
 take all defaults, or set some and be prompted for the rest:
 
 ```console
-$ colophon init my-vault --content djot --identity obsidian --yes
+$ colophon init my-vault --content djot --identity lazy --links id --yes
 initialized /home/you/my-vault
   root: index.dj — My Vault
-  config: colophon.yaml — metadata yaml, content djot, link style markdown_root, identity obsidian
+  config: colophon.yaml — metadata yaml, content djot, link style markdown_root, identity lazy, links id
 next: colophon new <path> --parent index.dj
 ```
 
 Flags: `--title`, `--author`, `--meta <yaml|json|fig>`, `--content
 <markdown|djot|html>`, `--link-style <markdown-root|markdown-relative|plain-relative|plain-canonical>`,
-`--identity <diaryx|obsidian>`, `--yes`. With no arguments, `init` initializes
+`--identity <off|lazy|eager>`, `--links <path|id>`, `--yes`. (`--links id` needs
+identity, so it's rejected with `--identity off`.) With no arguments, `init` initializes
 the current directory. It refuses to run where a workspace root already exists,
 so it's safe to re-run by mistake.
 
@@ -327,12 +333,22 @@ root) or `[[../index.md]]` (relative) to point at the real root.
 ## 9. Stable IDs (optional)
 
 Paths change; sometimes you want a link that *doesn't* break on a move. colophon
-can mint a stable ID for a document and resolve it back to a path — the Obsidian
-"the app owns your links" trick, except the identity data is a plain file in
-your own tree.
+can mint a stable ID for a document and resolve it back to a path — the "the app
+owns your links" trick, except the identity data is a plain file in your own tree.
 
-This is off in a Diaryx workspace. Turn it on by choosing **Obsidian** at
-`init` (`--identity obsidian`), or later with `colophon config identity lazy`:
+Two independent settings control this (§10):
+
+- **`identity`** — *when* a document earns a stable ID: `off` (never), `lazy`
+  (on a link-by-id or publish — the recommended default), or `eager` (every
+  document at creation).
+- **`id_links`** — *whether colophon authors structural links by ID* rather than
+  by path. Only meaningful when `identity` isn't off; with it on, a move rewrites
+  no links at all (the registry tracks the new path). The `init` **Links between
+  documents** prompt sets this.
+
+Even with `id_links` off, `lazy` identity means you can mint an ID on demand and
+paste a durable reference by hand. Turn identity on at `init` (`--identity lazy`,
+optionally `--links id`), or later with `colophon config identity lazy`:
 
 ```console
 $ colophon config identity lazy
@@ -354,9 +370,7 @@ the root's metadata via the `registry` relation — so the identity state is
 dotfolder. Deleting a document *tombstones* its ID (it stops resolving but is
 never reissued), so a stale `colophon:` reference stays diagnosable.
 
-Identity has three levels, set in config (§10): `off` (the Diaryx default),
-`lazy` (mint on link-by-id or publish — what **Obsidian** selects), and `eager`
-(mint on create). With `off`, `colophon id` politely refuses.
+With `identity: off`, `colophon id` politely refuses — there is nothing to mint.
 
 ---
 
@@ -370,13 +384,13 @@ reads and writes it.
 ```console
 $ colophon config                 # print the effective settings
 link_format: markdown_root
-identity: off
+identity: lazy
 id_links: false
 embed_format: yaml
 content_format: markdown
 
-$ colophon config identity lazy   # change one setting
-set identity = lazy in colophon.yaml
+$ colophon config id_links true   # change one setting
+set id_links = true in colophon.yaml
 ```
 
 The knobs:
@@ -389,10 +403,10 @@ The knobs:
 | `embed_format`  | `yaml`, `json`, `fig`                                         | metadata format for newly created documents          |
 | `content_format`| `markdown`, `djot`, `html`                                   | the body grammar the workspace is authored in        |
 
-The `init` **Identity** choice is a shorthand over two of these — **Diaryx** is
-`identity: off` with path links; **Obsidian** is `identity: lazy` +
-`id_links: true`, so structural links are by ID and a move rewrites nothing (the registry does the
-work).
+The two `init` identity prompts map straight onto these keys: **Identity** sets
+`identity`, and **Links between documents** sets `id_links` (`path` → `false`,
+`id` → `true`). With `identity: lazy` + `id_links: true`, structural links are by
+ID and a move rewrites nothing — the registry does the work.
 
 ---
 
