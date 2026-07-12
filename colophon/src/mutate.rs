@@ -884,6 +884,27 @@ mod tests {
             .build()
     }
 
+    #[test]
+    fn scan_ids_rebuilds_the_id_map_from_frontmatter() {
+        // Frontmatter-only storage: each document carries its own `id`; a flat
+        // scan reconstructs the id→path map with no registry document.
+        let dir = tempdir("scan-ids");
+        write(&dir, "index.md", "---\ntitle: Root\nid: aaaaaaa\n---\nbody\n");
+        write(&dir, "sub/child.md", "---\ntitle: Child\nid: bbbbbbb\n---\nbody\n");
+        // A document with no `id` is simply absent from the map, not an error.
+        write(&dir, "sub/plain.md", "---\ntitle: Plain\n---\nbody\n");
+
+        let mut ids = block_on(ws(&dir).scan_ids()).unwrap();
+        ids.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        assert_eq!(
+            ids,
+            vec![
+                (crate::identity::Id("aaaaaaa".into()), PathBuf::from("index.md")),
+                (crate::identity::Id("bbbbbbb".into()), PathBuf::from("sub/child.md")),
+            ]
+        );
+    }
+
     // Exercises inheritance of a `fig`-dialect parent block, so it needs that
     // backend on top of the module-wide `yaml` gate.
     #[cfg(feature = "fig-lang")]

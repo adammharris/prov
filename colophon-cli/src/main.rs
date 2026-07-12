@@ -17,9 +17,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colophon::tree::{Node, NodeKind};
 use colophon::document::MetaCarrier;
 use colophon::{
-    Addressing, ContentFormat, Document, EmbedStyle, FileIndex, Format, Id, IndexStore, LinkStyle,
-    Mapping, Minter, Registration, RelationStyleConfig, RelationSet, StdFs, Trigger, Value,
-    Workspace, WorkspaceConfig, Wrapper, block_on, edit, link, meta,
+    Addressing, ContentFormat, Document, EmbedStyle, FileIndex, Format, Id, IdStorage, IndexStore,
+    LinkStyle, Mapping, Minter, Registration, RelationStyleConfig, RelationSet, StdFs, Trigger,
+    Value, Workspace, WorkspaceConfig, Wrapper, block_on, edit, link, meta,
 };
 
 /// The filename stem of the registry document the CLI creates on first
@@ -114,6 +114,12 @@ enum Command {
         /// link-by-id or publish), or eager (at creation) (default: lazy).
         #[arg(long, value_enum)]
         identity: Option<IdentityArg>,
+        /// Where IDs live: registry (only in the registry document), frontmatter
+        /// (also stamped into each document's `id` field, registry kept as a
+        /// cache), or frontmatter-only (no registry document — self-describing,
+        /// but no tombstones) (default: registry).
+        #[arg(long, value_enum)]
+        id_storage: Option<IdStorageArg>,
         /// Accept every default without prompting.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -462,6 +468,36 @@ impl IdentityArg {
     }
 }
 
+/// Where a document's stable ID is stored — the `id_storage` config key
+/// ([`IdStorage`]). `Registry` is the current default (IDs only in the registry);
+/// `Frontmatter` also stamps each document's own `id` field (a portable,
+/// self-describing shadow, registry kept as a cache); `FrontmatterOnly` drops the
+/// registry entirely (self-describing, but no tombstones). `init` offers the
+/// first two; the third is deliberately flag-only.
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum IdStorageArg {
+    Registry,
+    Frontmatter,
+    FrontmatterOnly,
+}
+
+impl From<IdStorageArg> for IdStorage {
+    fn from(s: IdStorageArg) -> Self {
+        match s {
+            IdStorageArg::Registry => IdStorage::Registry,
+            IdStorageArg::Frontmatter => IdStorage::Frontmatter,
+            IdStorageArg::FrontmatterOnly => IdStorage::FrontmatterOnly,
+        }
+    }
+}
+
+impl IdStorageArg {
+    /// The lowercase spelling for the `init` summary line.
+    fn label(self) -> &'static str {
+        IdStorage::from(self).as_config_str()
+    }
+}
+
 /// The syntactic wrapper `init` authors references in — the *first* style axis
 /// (`--wrapper`), chosen before the addressing (see `docs/reference-styles.md`,
 /// "pick the wrapper first, then the substyle").
@@ -630,6 +666,7 @@ fn main() -> ExitCode {
             reference,
             link_style,
             identity,
+            id_storage,
             yes,
         } => cmd_init(
             dir.as_deref(),
@@ -642,6 +679,7 @@ fn main() -> ExitCode {
             reference,
             link_style,
             identity,
+            id_storage,
             yes,
         ),
         Command::Set { file, key, value } => cmd_set(&file, &key, &value),
@@ -788,19 +826,32 @@ with metadata and no part_of"
 /// root, a lazy identity policy, and the registry the root declares (an empty
 /// in-memory one when the root declares none — see `ensure_registry`).
 fn workspace(ctx: &Ctx) -> Result<Workspace<StdFs, Minter, FileIndex>, AnyError> {
-    let index = match &ctx.registry {
-        Some(rel) => {
-            let full = ctx.root_dir.join(rel);
-            let text = match std::fs::read_to_string(&full) {
-                Ok(text) => text,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(e) => return Err(e.into()),
-            };
-            FileIndex::parse(rel, &text)?
+    let index = if ctx.config.id_storage == IdStorage::FrontmatterOnly {
+        // No registry document: rebuild the id→path map by scanning each file's
+        // self-stored `id` field — a flat scan, independent of link resolution.
+        let probe: Workspace<StdFs> = Workspace::builder(StdFs).root(&ctx.root_dir).build();
+        let mut index = FileIndex::new(ctx.config.default_embed_format);
+        for (id, path) in block_on(probe.scan_ids())? {
+            index.register(&id, &path);
         }
-        // No registry declared yet: an empty in-memory one in the workspace's
-        // metadata format, so a later bootstrap writes that format.
-        None => FileIndex::new(ctx.config.default_embed_format),
+        // A scanned index reflects on-disk state, so it starts clean.
+        index.mark_clean();
+        index
+    } else {
+        match &ctx.registry {
+            Some(rel) => {
+                let full = ctx.root_dir.join(rel);
+                let text = match std::fs::read_to_string(&full) {
+                    Ok(text) => text,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(e) => return Err(e.into()),
+                };
+                FileIndex::parse(rel, &text)?
+            }
+            // No registry declared yet: an empty in-memory one in the workspace's
+            // metadata format, so a later bootstrap writes that format.
+            None => FileIndex::new(ctx.config.default_embed_format),
+        }
     };
     // The relation vocabulary picks up any per-relation `style` overrides the
     // config document declares (up≠down), overlaid on the diaryx default set.
@@ -823,6 +874,11 @@ fn workspace(ctx: &Ctx) -> Result<Workspace<StdFs, Minter, FileIndex>, AnyError>
 /// the `registry` pointer to the root's metadata — comment-preservingly, like
 /// any other edit.
 fn ensure_registry(ctx: &mut Ctx) -> Result<(), AnyError> {
+    // Frontmatter-only storage keeps no registry document — IDs live solely in
+    // each file's `id` field, so there is nothing to bootstrap or point at.
+    if !ctx.config.id_storage.keeps_registry() {
+        return Ok(());
+    }
     if ctx.registry.is_some() {
         return Ok(());
     }
@@ -861,6 +917,51 @@ fn save_index(ctx: &Ctx, ws: &mut Workspace<StdFs, Minter, FileIndex>) -> Result
     let rendered = ws.index_mut().render()?;
     std::fs::write(ctx.root_dir.join(rel), rendered)?;
     ws.index_mut().mark_clean();
+    Ok(())
+}
+
+/// Persist a mutation's identity changes according to the workspace's
+/// [`IdStorage`] mode: stamp each live ID into its document's `id` frontmatter
+/// (frontmatter / frontmatter-only), and write the registry snapshot (registry /
+/// frontmatter). Frontmatter-only keeps no registry, so the in-memory index —
+/// rebuilt next run by scanning — is simply marked clean.
+fn persist(ctx: &Ctx, ws: &mut Workspace<StdFs, Minter, FileIndex>) -> Result<(), AnyError> {
+    if ctx.config.id_storage.stamps_frontmatter() {
+        stamp_ids(ctx, ws)?;
+    }
+    if ctx.config.id_storage.keeps_registry() {
+        save_index(ctx, ws)?;
+    } else {
+        // No registry document to write; the id→path map is derived from the
+        // frontmatter we just stamped, so discard the dirtiness.
+        ws.index_mut().mark_clean();
+    }
+    Ok(())
+}
+
+/// Stamp every live ID into its document's `id` frontmatter field, so the ID
+/// travels with the file (DESIGN §5's self-describing shadow). Idempotent: a
+/// document already carrying the right ID is left untouched, so this both
+/// back-fills a workspace that just switched to frontmatter storage and records
+/// freshly-minted IDs. A tombstoned ID has no live path and is skipped.
+fn stamp_ids(ctx: &Ctx, ws: &mut Workspace<StdFs, Minter, FileIndex>) -> Result<(), AnyError> {
+    let pairs: Vec<(Id, PathBuf)> =
+        ws.index().iter().map(|(id, path)| (id.clone(), path.clone())).collect();
+    for (id, rel) in pairs {
+        let full = ctx.root_dir.join(&rel);
+        let Ok(text) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        let Ok(doc) = Document::parse(&rel, &text) else {
+            continue;
+        };
+        // Already carries this exact ID — nothing to write.
+        if doc.meta.get("id").and_then(Value::as_str) == Some(id.0.as_str()) {
+            continue;
+        }
+        let updated = edit::set_in_text(&text, doc.carrier, "id", edit::infer_scalar(&id.0))?;
+        std::fs::write(&full, updated)?;
+    }
     Ok(())
 }
 
@@ -927,6 +1028,7 @@ fn cmd_init(
     reference: Option<ReferenceArg>,
     link_style: Option<LinkStyleArg>,
     identity: Option<IdentityArg>,
+    id_storage: Option<IdStorageArg>,
     yes: bool,
 ) -> CmdResult {
     let dir = match dir {
@@ -961,6 +1063,7 @@ fn cmd_init(
     let reference_prompt_possible = reference.is_none() && identity != Some(IdentityArg::Off);
     let path_format_possible =
         link_style.is_none() && matches!(reference, None | Some(ReferenceArg::Path));
+    let id_storage_prompt_possible = id_storage.is_none() && identity != Some(IdentityArg::Off);
     let prompting = interactive
         && (title.is_none()
             || author.is_none()
@@ -970,7 +1073,8 @@ fn cmd_init(
             || wrapper.is_none()
             || identity.is_none()
             || reference_prompt_possible
-            || path_format_possible);
+            || path_format_possible
+            || id_storage_prompt_possible);
     if prompting {
         cliclack::intro("colophon init")?;
     }
@@ -1089,6 +1193,19 @@ fn cmd_init(
         None if interactive && reference.uses_path() => prompt_path_format(wrapper)?,
         None => LinkStyleArg::MarkdownRoot,
     };
+    // Where IDs are stored — only meaningful once something mints them, so the
+    // prompt is skipped (and forced to `registry`) when identity is off. The
+    // interactive menu offers registry/frontmatter; `frontmatter-only` is
+    // deliberately flag-only (it forfeits tombstones).
+    let id_storage = if identity == IdentityArg::Off {
+        IdStorageArg::Registry
+    } else {
+        match id_storage {
+            Some(s) => s,
+            None if interactive => prompt_id_storage()?,
+            None => IdStorageArg::Registry,
+        }
+    };
 
     // Assemble the workspace preferences these choices encode. The (wrapper,
     // reference) pair writes the default `reference_*` axes and any per-relation
@@ -1101,6 +1218,7 @@ fn cmd_init(
         reference_target: None,
         reference_label: None,
         relation_styles: std::collections::BTreeMap::new(),
+        id_storage: id_storage.into(),
         default_embed_format: meta.into(),
         embed_style: embed,
         content_format: content.into(),
@@ -1174,9 +1292,15 @@ fn cmd_init(
     } else {
         String::new()
     };
+    // ID storage only matters once identity is on (something mints).
+    let id_storage_note = if identity != IdentityArg::Off {
+        format!(", id storage {}", id_storage.label())
+    } else {
+        String::new()
+    };
     let details = format!(
         "root: {root_name} — {title}{author_note}\n\
-         config: {config_name} — content {}, embed {} ({}), language {}, identity {}, wrapper {}, references {}{path_note}",
+         config: {config_name} — content {}, embed {} ({}), language {}, identity {}, wrapper {}, references {}{path_note}{id_storage_note}",
         content.label(),
         embed.as_config_str(),
         embed_label.to_lowercase(),
@@ -1243,6 +1367,21 @@ fn prompt_reference(identity: IdentityArg, wrapper: WrapperArg) -> std::io::Resu
         }
     }
     select.interact()
+}
+
+/// Prompt for where IDs are stored — registry vs. a self-describing frontmatter
+/// shadow. The `frontmatter-only` mode (no registry) is intentionally not offered
+/// here; it forfeits tombstones and is reachable only via `--id-storage`.
+fn prompt_id_storage() -> std::io::Result<IdStorageArg> {
+    cliclack::select("Where IDs are stored")
+        .initial_value(IdStorageArg::Registry)
+        .item(IdStorageArg::Registry, "Registry only", "IDs live in one registry document")
+        .item(
+            IdStorageArg::Frontmatter,
+            "In each file (+ registry)",
+            "each document carries its own `id`; portable, travels with the file",
+        )
+        .interact()
 }
 
 /// Prompt for how *path* references are rendered — asked only when a by-path
@@ -1548,7 +1687,7 @@ fn cmd_new(path: &Path, parent: &Path) -> CmdResult {
     }
     let mut ws = workspace(&ctx)?;
     let created = block_on(ws.create(&ws_rel(&ctx, path)?, &ws_rel(&ctx, parent)?))?;
-    save_index(&ctx, &mut ws)?;
+    persist(&ctx, &mut ws)?;
     // A separated child is a pair — the metadata node the parent links, plus its
     // prose body file. Name both so it is clear two files were written.
     match &created.body {
@@ -1565,7 +1704,7 @@ fn cmd_mv(from: &Path, to: &Path) -> CmdResult {
     let ctx = find_root()?;
     let mut ws = workspace(&ctx)?;
     block_on(ws.rename(&ws_rel(&ctx, from)?, &ws_rel(&ctx, to)?))?;
-    save_index(&ctx, &mut ws)?;
+    persist(&ctx, &mut ws)?;
     println!("moved {} -> {}", from.display(), to.display());
     Ok(ExitCode::SUCCESS)
 }
@@ -1574,7 +1713,7 @@ fn cmd_rm(path: &Path, force: bool) -> CmdResult {
     let ctx = find_root()?;
     let mut ws = workspace(&ctx)?;
     let danglers = block_on(ws.delete(&ws_rel(&ctx, path)?, force))?;
-    save_index(&ctx, &mut ws)?;
+    persist(&ctx, &mut ws)?;
     println!("deleted {}", path.display());
     for finding in &danglers {
         eprintln!("warning: now dangling — {finding}");
@@ -1592,7 +1731,7 @@ fn cmd_id(file: &Path) -> CmdResult {
     ensure_registry(&mut ctx)?;
     let mut ws = workspace(&ctx)?;
     let id = block_on(ws.register(&ws_rel(&ctx, file)?, Trigger::Link))?;
-    save_index(&ctx, &mut ws)?;
+    persist(&ctx, &mut ws)?;
     println!("{}", link::id_target(&id));
     Ok(ExitCode::SUCCESS)
 }

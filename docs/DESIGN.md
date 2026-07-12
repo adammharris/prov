@@ -188,7 +188,11 @@ Consequences the implementation must honor:
   rebuildable backup. If frontmatter carries a shadow copy of the ID, the registry
   becomes rebuildable again — i.e. back to a pure cache. (This trades away some of
   model B's document-cleanliness; it is a per-deployment choice, not a crate-level
-  default.)
+  default.) **Implemented** as the `id_storage` axis (`IdStorage`):
+  `frontmatter` keeps the shadow copy *and* the cache; `frontmatter_only` drops
+  the registry entirely and rebuilds id→path from a scan (`Workspace::scan_ids`),
+  at the cost of tombstones. The ID then travels with the file — copy- and
+  out-of-band-move-robust — since a move no longer needs a registry update.
 
 The materialization also serves performance: today the graph is derived by
 walking the spanning relation from a root on demand; an optional materialized
@@ -294,6 +298,7 @@ not yet ported.
 | Relation vocabulary + edge/child extraction | `relation` | ✅ implemented + tested |
 | Identity policy + registration triggers | `identity` | ✅ betanumeric+check minter (ARK lineage, no shoulder), `Trigger` events, `Workspace::register` (idempotent, policy-gated), mint-by-rejection |
 | Index store (id↔path registry) | `index` | ✅ `NoIndex` + `InMemoryIndex` + persistent `FileIndex` — records live under the `registry` key of a *workspace document* (bare config file or markdown frontmatter alike), tombstones as `id: null`, block layout, per-record preserving upserts |
+| Identity storage axis (§5 escape hatch) | `config`/`workspace`/CLI | ✅ `IdStorage` = `registry` (default) · `frontmatter` (stamp each doc's own `id` field + keep the registry as a rebuildable cache) · `frontmatter_only` (no registry; id→path rebuilt by `Workspace::scan_ids`, tombstones forfeited). `init` prompts registry vs frontmatter; `--id-storage frontmatter-only` reaches the third. Frontmatter storage makes identity move/copy-robust — the ID travels with the file |
 | Registry reachability | `relation`/`workspace` | ✅ the root links its registry via the `registry` relation (in the diaryx preset); `Workspace::registry_path` discovers it by following the link — never an app-private sidecar path |
 | Config files as documents | `document`/`edit` | ✅ `.yaml`/`.yml`/`.json`/`.fig`/`.figl` parse as whole-file-metadata documents (`MetaCarrier::WholeFile`); carrier-aware `MetaEditor` edits both shapes preserving comments/format |
 | ID links (`colophon:<id>` targets) | `link`/`tree`/`validate`/`mutate` | ✅ resolve through the registry everywhere paths do; never rewritten by moves (the registry update is the maintenance); findings: `MalformedId` (check char), `DanglingId` (tombstoned vs never-issued) |

@@ -64,7 +64,7 @@ pub mod tree;
 pub mod validate;
 pub mod workspace;
 
-pub use config::{RelationStyleConfig, WorkspaceConfig};
+pub use config::{IdStorage, RelationStyleConfig, WorkspaceConfig};
 pub use content::ContentFormat;
 pub use content::{code_spans, render_html};
 pub use document::{Document, EmbedStyle, EmbedType, embed_carrier};

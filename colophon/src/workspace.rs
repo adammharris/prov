@@ -263,6 +263,58 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
         Ok(index)
     }
 
+    /// Scan every document under the root for a self-stored `id` frontmatter
+    /// field, returning the `(id, path)` pairs — the rebuildable id→path map for
+    /// the frontmatter-only identity storage mode ([`IdStorage::FrontmatterOnly`]).
+    /// Like [`title_index`](Self::title_index) this is a flat filesystem scan,
+    /// deliberately independent of link resolution (so it can bootstrap the very
+    /// index that id links resolve through, with no chicken-and-egg).
+    ///
+    /// [`IdStorage::FrontmatterOnly`]: crate::config::IdStorage::FrontmatterOnly
+    pub async fn scan_ids(&self) -> Result<Vec<(crate::identity::Id, PathBuf)>> {
+        let mut ids = Vec::new();
+        self.scan_ids_dir(PathBuf::new(), &mut ids).await?;
+        Ok(ids)
+    }
+
+    /// Recursively collect self-stored `id` fields under `rel_dir`. Same walk as
+    /// [`scan_titles`](Self::scan_titles); unreadable/hidden entries are skipped.
+    fn scan_ids_dir<'a>(
+        &'a self,
+        rel_dir: PathBuf,
+        ids: &'a mut Vec<(crate::identity::Id, PathBuf)>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
+        Box::pin(async move {
+            let Ok(entries) = self.fs.read_dir(&self.root.join(&rel_dir)).await else {
+                return Ok(());
+            };
+            for entry in entries {
+                let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                    continue;
+                };
+                if name.starts_with('.') {
+                    continue;
+                }
+                let rel = if rel_dir.as_os_str().is_empty() {
+                    PathBuf::from(&name)
+                } else {
+                    rel_dir.join(&name)
+                };
+                if entry.file_type().is_dir() {
+                    self.scan_ids_dir(rel, ids).await?;
+                } else if entry.file_type().is_file()
+                    && is_document_path(&rel)
+                    && let Ok((_, doc)) = self.load(&rel).await
+                    && let Some(id) = doc.meta.get("id").and_then(Value::as_str)
+                    && !id.trim().is_empty()
+                {
+                    ids.push((crate::identity::Id(id.trim().to_string()), rel));
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Recursively index the documents under the workspace-relative `rel_dir`.
     /// Unreadable directories and files are skipped (a title index is a
     /// best-effort cache, not a validation pass); hidden entries (`.`-prefixed)

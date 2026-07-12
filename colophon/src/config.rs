@@ -44,6 +44,59 @@ pub struct RelationStyleConfig {
     pub label: Option<bool>,
 }
 
+/// Where a document's stable ID is persisted — the identity-storage axis
+/// (DESIGN §5). Orthogonal to *when* an ID is minted ([`Registration`]) and to
+/// how references are spelled; this is purely the ID's *home*.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IdStorage {
+    /// **Model B, registry only** (the default): IDs live solely in the registry
+    /// document — authoritative, non-derivable, resolved by direct lookup.
+    #[default]
+    Registry,
+    /// **Model B's escape hatch**: each document also carries its own ID in an
+    /// `id` frontmatter field (a portable, self-describing shadow), and the
+    /// registry is retained as a rebuildable cache + tombstone ledger. The ID
+    /// travels with the file across copies and out-of-band moves.
+    Frontmatter,
+    /// **Frontmatter only**: the `id` field is the sole home; no registry
+    /// document is written and resolution rebuilds the id→path map by scanning
+    /// frontmatter. Maximally self-describing, but it forfeits tombstones (a
+    /// deleted file takes its ID with it), so an ID can in principle be reminted.
+    FrontmatterOnly,
+}
+
+impl IdStorage {
+    /// Whether this mode writes the ID into each document's `id` frontmatter.
+    pub fn stamps_frontmatter(self) -> bool {
+        matches!(self, IdStorage::Frontmatter | IdStorage::FrontmatterOnly)
+    }
+
+    /// Whether this mode keeps a registry document (the authoritative store, or —
+    /// under [`Frontmatter`](IdStorage::Frontmatter) — a rebuildable cache).
+    pub fn keeps_registry(self) -> bool {
+        matches!(self, IdStorage::Registry | IdStorage::Frontmatter)
+    }
+
+    /// Parse the `id_storage` config spelling; unknown → `None`.
+    pub fn from_config_str(value: &str) -> Option<Self> {
+        match value {
+            "registry" => Some(Self::Registry),
+            "frontmatter" => Some(Self::Frontmatter),
+            "frontmatter_only" => Some(Self::FrontmatterOnly),
+            _ => None,
+        }
+    }
+
+    /// The `id_storage` config spelling.
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Registry => "registry",
+            Self::Frontmatter => "frontmatter",
+            Self::FrontmatterOnly => "frontmatter_only",
+        }
+    }
+}
+
 /// The workspace-wide policy a config document declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceConfig {
@@ -73,6 +126,9 @@ pub struct WorkspaceConfig {
     /// every relation inherits the default. Resolve with
     /// [`resolved_relation_styles`](Self::resolved_relation_styles).
     pub relation_styles: BTreeMap<String, RelationStyleConfig>,
+    /// Where a document's stable ID is persisted — registry, frontmatter shadow,
+    /// or frontmatter only (DESIGN §5). Independent of the `identity` trigger.
+    pub id_storage: IdStorage,
     /// The metadata format new documents get when they inherit no parent block
     /// — a *default* for authoring, never a workspace constraint (§7).
     pub default_embed_format: fig::Format,
@@ -102,6 +158,7 @@ impl Default for WorkspaceConfig {
             reference_target: None,
             reference_label: None,
             relation_styles: BTreeMap::new(),
+            id_storage: IdStorage::Registry,
             default_embed_format: fig::Format::Yaml,
             embed_style: EmbedStyle::Delimited,
             content_format: ContentFormat::Markdown,
@@ -121,6 +178,7 @@ impl WorkspaceConfig {
             reference_target: None,
             reference_label: None,
             relation_styles: BTreeMap::new(),
+            id_storage: IdStorage::Registry,
             default_embed_format: fig::Format::Yaml,
             embed_style: EmbedStyle::Delimited,
             content_format: ContentFormat::Markdown,
@@ -139,6 +197,7 @@ impl WorkspaceConfig {
             reference_target: None,
             reference_label: None,
             relation_styles: BTreeMap::new(),
+            id_storage: IdStorage::Registry,
             default_embed_format: fig::Format::Yaml,
             embed_style: EmbedStyle::Delimited,
             content_format: ContentFormat::Markdown,
@@ -240,6 +299,11 @@ impl WorkspaceConfig {
                 }
             }
         }
+        if let Some(storage) =
+            meta.get("id_storage").and_then(Value::as_str).and_then(IdStorage::from_config_str)
+        {
+            self.id_storage = storage;
+        }
         if let Some(format) =
             meta.get("embed_format").and_then(Value::as_str).and_then(format_from_str)
         {
@@ -298,6 +362,7 @@ impl WorkspaceConfig {
             }
             map.insert("relations".into(), Value::Mapping(relations));
         }
+        map.insert("id_storage".into(), Value::String(self.id_storage.as_config_str().into()));
         map.insert("embed_format".into(), Value::String(format_str(self.default_embed_format).into()));
         map.insert("embed_type".into(), Value::String(self.embed_style.as_config_str().into()));
         map.insert("content_format".into(), Value::String(self.content_format.as_config_str().into()));
@@ -394,6 +459,7 @@ mod tests {
                     },
                 ),
             ]),
+            id_storage: IdStorage::Frontmatter,
             default_embed_format: fig::Format::Yaml,
             embed_style: EmbedStyle::CodeBlock,
             content_format: ContentFormat::Djot,
