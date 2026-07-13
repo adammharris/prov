@@ -46,6 +46,7 @@ compile_error!(
      You have disabled the default feature without selecting a replacement."
 );
 
+pub mod attach;
 pub mod config;
 pub mod content;
 pub mod document;
@@ -68,7 +69,7 @@ pub mod workspace;
 pub use config::{IdStorage, RelationStyleConfig, WorkspaceConfig};
 pub use content::ContentFormat;
 pub use content::{code_spans, render_html};
-pub use document::{Document, EmbedStyle, EmbedType, embed_carrier};
+pub use document::{Document, EmbedStyle, EmbedType, embed_carrier, is_opaque_payload};
 pub use error::{Error, Result};
 pub use exec::block_on;
 pub use fig::Format;

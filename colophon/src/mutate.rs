@@ -380,7 +380,11 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         self.fs().write(&self.root().join(&to), self_text.as_bytes()).await?;
         if let Some(mv) = &body_move {
             self.fs().rename(&self.root().join(&mv.from), &self.root().join(&mv.to)).await?;
-            self.fs().write(&self.root().join(&mv.to), mv.text.as_bytes()).await?;
+            // A prose body is rewritten with its re-relativized text; an opaque
+            // payload (`text` is `None`) is left exactly as the rename moved it.
+            if let Some(text) = &mv.text {
+                self.fs().write(&self.root().join(&mv.to), text.as_bytes()).await?;
+            }
         }
         for (source, text) in inbound_writes {
             self.fs().write(&self.root().join(&source), text.as_bytes()).await?;
@@ -644,9 +648,15 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     }
 
     /// If `from` is a separated node, plan the move of its body file to sit
-    /// beside `to` (same stem, keeping the body's own extension), with its prose
-    /// wikilinks re-relativized when the directory changes. `None` for a combined
-    /// document.
+    /// beside `to`, with its prose wikilinks re-relativized when the directory
+    /// changes. `None` for a combined document.
+    ///
+    /// The body's new name follows the pair's naming convention. A separated
+    /// **prose** node shares its body's stem (`notes.yaml` ↔ `notes.md`), so the
+    /// body keeps its own extension on the new stem. An **attachment** node
+    /// carries the whole payload name plus a metadata extension (`hero.jpg.yaml`
+    /// ↔ `hero.jpg`), so the payload name *is* the node's stem — reconstructing it
+    /// with the body's extension would double it (`hero.jpg.jpg`).
     async fn plan_body_move(
         &self,
         doc: &Document,
@@ -656,24 +666,42 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         let Some(body_from) = content_target(doc, from) else {
             return Ok(None);
         };
-        let body_ext = body_from.extension().and_then(|e| e.to_str()).unwrap_or("md");
-        let body_to = to.with_extension(body_ext);
+        let opaque = crate::document::is_opaque_payload(&body_from);
+        let body_to = if opaque {
+            // Attachment full-name convention: the payload basename is the node's
+            // file stem, already carrying the payload's own extension.
+            let stem = to.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+            to.with_file_name(stem)
+        } else {
+            // Separated prose convention: node and body share a stem; the body
+            // keeps its own extension.
+            let body_ext = body_from.extension().and_then(|e| e.to_str()).unwrap_or("md");
+            to.with_extension(body_ext)
+        };
         let new_ref = body_to
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        let (raw, _) = self.load(&body_from).await?;
-        let text = if from.parent() != to.parent() {
-            rerelativize_body_wikilinks(&raw, &raw, &body_from, &body_to)
+        // An *attachment* payload is opaque bytes (an image, a PDF) — never read
+        // it as text, and never rewrite it. The bare `rename` carries the bytes;
+        // `text` stays `None`. A prose body is loaded and its wikilinks
+        // re-relativized when the directory changes, as before.
+        let text = if opaque {
+            None
         } else {
-            raw
+            let (raw, _) = self.load(&body_from).await?;
+            Some(if from.parent() != to.parent() {
+                rerelativize_body_wikilinks(&raw, &raw, &body_from, &body_to)
+            } else {
+                raw
+            })
         };
         Ok(Some(BodyMove { from: body_from, to: body_to, new_ref, text }))
     }
 
     /// The spanning relation's name and its inverse — mutations need both.
-    fn spanning_pair(&self) -> Result<(String, String)> {
+    pub(crate) fn spanning_pair(&self) -> Result<(String, String)> {
         let spanning = self
             .relations()
             .spanning_relation()
@@ -812,8 +840,10 @@ struct BodyMove {
     to: PathBuf,
     /// The metadata file's new `content` value — the body file's basename.
     new_ref: String,
-    /// The body file's text, wikilinks re-relativized if the directory changed.
-    text: String,
+    /// The prose body's text, wikilinks re-relativized if the directory changed,
+    /// to rewrite after the move. `None` for an opaque attachment payload, whose
+    /// bytes the bare rename carries untouched.
+    text: Option<String>,
 }
 
 /// The workspace-relative path a document's `content` attribute points at (its

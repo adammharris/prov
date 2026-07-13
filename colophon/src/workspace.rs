@@ -19,12 +19,12 @@
 //! The filesystem-driven `scan`/traverse/mutate engine ports from `diaryx_core`
 //! next; the seams are in place so that port has somewhere to land.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use crate::content::ContentFormat;
-use crate::document::whole_file_format;
 use crate::error::{Error, Result};
 use crate::fs::Storage;
 use crate::identity::{IdentityPolicy, NoIdentity, Trigger};
@@ -139,7 +139,7 @@ impl<FS, Id, Ix> Workspace<FS, Id, Ix> {
 /// metadata format (YAML/JSON/…). Non-document files (images, binaries) are
 /// skipped so the scan neither reads nor mis-indexes them.
 fn is_document_path(path: &Path) -> bool {
-    ContentFormat::from_extension(path).is_some() || whole_file_format(path).is_some()
+    !crate::document::is_opaque_payload(path)
 }
 
 /// The resolution of one link target against a workspace: a path, an ID the
@@ -289,6 +289,50 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
         self.scan_content_dir(PathBuf::new(), &mut docs).await?;
         docs.sort();
         Ok(docs)
+    }
+
+    /// The workspace-relative direct-child files of each directory in `dirs`
+    /// (non-recursive), skipping hidden entries and unreadable directories.
+    ///
+    /// The bounded-scan primitive behind reachability-scoped discovery (DESIGN
+    /// §8): it opens only the directories it is handed and never descends into
+    /// subdirectories, so an *unreached* directory — a vendored tree, a nested
+    /// colophon workspace — is neither read nor reported. Callers filter the
+    /// result for the file kind they care about (content documents for the orphan
+    /// check, opaque payloads for `attach --all`).
+    pub(crate) async fn direct_child_files(&self, dirs: &BTreeSet<PathBuf>) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for dir in dirs {
+            let Ok(entries) = self.fs.read_dir(&self.root.join(dir)).await else {
+                continue;
+            };
+            for entry in entries {
+                let Some(name) = entry.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                    continue;
+                };
+                if name.starts_with('.') || !entry.file_type().is_file() {
+                    continue;
+                }
+                files.push(if dir.as_os_str().is_empty() {
+                    PathBuf::from(&name)
+                } else {
+                    dir.join(&name)
+                });
+            }
+        }
+        Ok(files)
+    }
+
+    /// The directories the reachable set `reachable` occupies — each reached
+    /// document's own directory (the workspace root's directory always among
+    /// them, since the root document is reachable). The scope
+    /// [`direct_child_files`](Self::direct_child_files) is bounded to: a directory
+    /// is "known" precisely when a linked document lives directly in it.
+    pub(crate) fn reached_dirs(reachable: &BTreeSet<PathBuf>) -> BTreeSet<PathBuf> {
+        reachable
+            .iter()
+            .map(|p| p.parent().unwrap_or(Path::new("")).to_path_buf())
+            .collect()
     }
 
     /// Recursively collect content-document paths under `rel_dir`. Same walk as

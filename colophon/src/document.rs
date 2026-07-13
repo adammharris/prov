@@ -61,6 +61,17 @@ pub fn whole_file_format(path: &Path) -> Option<fig::Format> {
     }
 }
 
+/// Whether colophon can read `path` as text — a recognized body format
+/// (Markdown/Djot/HTML) or a whole-file metadata format (YAML/JSON/…). Its
+/// negation is an **opaque payload**: a file colophon treats as bytes (an image,
+/// a PDF, a font, any binary) and never parses. An *attachment* is exactly a
+/// whole-file metadata sidecar whose `content` points at such a payload, which
+/// is how an arbitrary file gains workspace-linked metadata without being able
+/// to carry frontmatter itself.
+pub fn is_opaque_payload(path: &Path) -> bool {
+    crate::content::ContentFormat::from_extension(path).is_none() && whole_file_format(path).is_none()
+}
+
 /// The canonical whole-file extension for a metadata `format` — the inverse of
 /// [`whole_file_format`]. Used when materializing a whole-file metadata document
 /// (a config/registry sidecar, or the metadata half of a *separated* document):
@@ -267,6 +278,27 @@ impl Document {
     /// prose body in a sibling file, keeping both halves plain text and linked.
     pub fn content_attr(&self) -> Option<&str> {
         self.meta.get("content").and_then(Value::as_str)
+    }
+
+    /// `true` when this document is an **attachment sidecar**: a whole-file
+    /// metadata document whose `content` points at an [opaque
+    /// payload](is_opaque_payload) rather than a prose body. Recognized two ways,
+    /// so a hand-written sidecar need not be verbose: an explicit `attachment:
+    /// true` flag (what [`Workspace::attach`](crate::Workspace::attach) writes),
+    /// **or** a `content` target whose extension colophon cannot read as text.
+    ///
+    /// A *separated prose* document (`content` → a `.md`/`.dj`/`.html` body) is
+    /// deliberately **not** an attachment: its body is a colophon document in its
+    /// own right, scanned for links and titles; an attachment's payload is bytes
+    /// colophon never opens.
+    pub fn is_attachment(&self) -> bool {
+        match self.content_attr() {
+            None => false,
+            Some(content) => {
+                self.meta.get("attachment").and_then(Value::as_bool) == Some(true)
+                    || is_opaque_payload(Path::new(content))
+            }
+        }
     }
 }
 

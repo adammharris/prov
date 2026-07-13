@@ -50,6 +50,12 @@ pub struct StructurePlan {
 impl StructurePlan {
     /// Nothing to create and nothing to adopt — the directory holds no content
     /// beyond the root.
+    ///
+    /// A `mirror` import folds only *documents* into the tree; loose opaque files
+    /// (images, PDFs, binaries) are deliberately left alone — attaching them is a
+    /// separate, explicit act ([`attach`](Workspace::attach) /
+    /// [`loose_attachments`](Workspace::loose_attachments)), never inferred in
+    /// bulk from a directory walk.
     pub fn is_empty(&self) -> bool {
         self.synthesized.is_empty() && self.adoptions.is_empty()
     }
@@ -346,6 +352,28 @@ mod tests {
         block_on(ws(&dir).apply_plan(&plan)).unwrap();
         assert!(read(&dir, "a/index.md").contains("a/b/index.md"), "a contains a/b");
         assert!(read(&dir, "a/b/index.md").contains("deep.md"), "a/b contains the leaf");
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn mirror_leaves_loose_binaries_alone() {
+        // A vault with a note tree and loose binaries: `mirror` folds the
+        // documents in but never sidecars the binaries — attaching them is a
+        // separate, explicit act, not inferred from a directory walk.
+        let dir = tempdir("mirror-no-attach");
+        write(&dir, "index.md", "---\ntitle: Home\n---\n");
+        write(&dir, "notes/one.md", "---\ntitle: One\n---\nfirst\n");
+        write(&dir, "cover.jpg", "\u{fffd}binary");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+
+        let plan = block_on(ws(&dir).plan_mirror(Path::new("index.md"))).unwrap();
+        block_on(ws(&dir).apply_plan(&plan)).unwrap();
+
+        // The document folded in; neither binary got a sidecar.
+        assert!(read(&dir, "notes/index.md").contains("one.md"));
+        assert!(!dir.join("cover.jpg.yaml").exists(), "no sidecar for the image");
+        assert!(!dir.join("src/index.md").exists(), "an all-code directory gets no folder-note");
+        // The binaries are simply not colophon's concern — check is clean, no orphan.
         assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
     }
 
