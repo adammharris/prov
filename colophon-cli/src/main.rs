@@ -19,8 +19,8 @@ use colophon::document::MetaCarrier;
 use colophon::{
     Addressing, Adoption, ContentFormat, Document, EmbedStyle, FileIndex, Format, Id, IdStorage,
     IndexStore, LinkStyle, Mapping, Minter, Registration, RelationStyleConfig, RelationSet, StdFs,
-    StructurePlan, SynthNode, Trigger, Value, Workspace, WorkspaceConfig, Wrapper, block_on, edit,
-    link, meta,
+    StructurePlan, SynthNode, Target, Trigger, Value, Workspace, WorkspaceConfig, Wrapper, block_on,
+    edit, link, meta,
 };
 
 /// The filename stem of the registry document the CLI creates on first
@@ -198,6 +198,12 @@ enum Command {
     Tree {
         /// The document to discover from (default: the workspace root).
         root: Option<PathBuf>,
+    },
+    /// Interactively explore the workspace: view a document and follow any of its
+    /// links — or its backlinks — moving through the graph from the terminal.
+    Explore {
+        /// The document to start from (default: the workspace root).
+        file: Option<PathBuf>,
     },
     /// Check workspace integrity from a root: broken links, case mismatches,
     /// duplicate containment, missing inverse links, dangling IDs. Exits 1 on
@@ -742,6 +748,7 @@ fn main() -> ExitCode {
         Command::Set { file, key, value } => cmd_set(&file, &key, &value),
         Command::Unset { file, key } => cmd_unset(&file, &key),
         Command::Tree { root } => cmd_tree(root.as_deref()),
+        Command::Explore { file } => cmd_explore(file.as_deref()),
         Command::Check { root, fix } => cmd_check(root.as_deref(), fix),
         Command::New { path, parent } => cmd_new(&path, &parent),
         Command::Attach { payload, parent, all, recursive } => {
@@ -2287,6 +2294,183 @@ fn print_node(node: &Node, prefix: &str, is_last: bool, is_root: bool) {
     for (i, child) in node.children.iter().enumerate() {
         print_node(child, &child_prefix, i + 1 == node.children.len(), false);
     }
+}
+
+/// One choice on an explore screen — what selecting the menu item does.
+enum ExploreAction {
+    /// Page the current document's raw text.
+    View,
+    /// Open the current document in `$EDITOR`.
+    Edit,
+    /// Navigate to another document (a resolved forward link or a backlink).
+    Goto(PathBuf),
+    /// A link that resolves to nothing followable (external, unresolved id,
+    /// ambiguous alias) — selecting it just prints why.
+    Note(String),
+    /// Return to the previously-visited document.
+    Back,
+    Quit,
+}
+
+/// Interactively walk the workspace graph: at each document, view or edit it, or
+/// follow any forward link (in any relation) or backlink to move on. A thin loop
+/// over the library's resolution — the same path/id/alias resolution `tree` and
+/// `check` use, with the reachability-scoped title index and the backlink map
+/// each computed once up front.
+fn cmd_explore(file: Option<&Path>) -> CmdResult {
+    let ctx = find_root()?;
+    let ws = workspace(&ctx)?;
+    let root = ctx.root_doc.clone();
+    let mut current = match file {
+        Some(f) => ws_rel(&ctx, f)?,
+        None => root.clone(),
+    };
+    // Alias resolution and backlinks, computed once — both bounded/lazy, so cheap
+    // even at the root of a large repo.
+    let titles = block_on(ws.title_index_scoped(&root))?;
+    let backlinks = block_on(ws.backlinks(&root))?;
+
+    let mut history: Vec<PathBuf> = Vec::new();
+    loop {
+        let full = ctx.root_dir.join(&current);
+        let (text, doc) = match load(&full) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("colophon: cannot open {}: {e}", current.display());
+                match history.pop() {
+                    Some(prev) => {
+                        current = prev;
+                        continue;
+                    }
+                    None => return Ok(ExitCode::FAILURE),
+                }
+            }
+        };
+        let title = doc.meta.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+
+        // Build the menu: view/edit, every forward link (by relation), every
+        // backlink, then navigation.
+        let mut actions: Vec<(String, String, ExploreAction)> = Vec::new();
+        actions.push(("View this document".into(), "page the raw file".into(), ExploreAction::View));
+        actions.push(("Edit in $EDITOR".into(), String::new(), ExploreAction::Edit));
+
+        for relation in ws.relations().relations() {
+            let Some(value) = doc.meta.get(&relation.name) else { continue };
+            for raw in value.link_strings() {
+                let parsed = link::Link::parse(&raw);
+                let (label, action) = match ws.resolve_link_with(&current, &parsed, Some(&titles)) {
+                    Target::Path(p) => {
+                        let t = doc_title(&ctx, &p);
+                        (format!("{}: {t}  ({})", relation.name, p.display()), ExploreAction::Goto(p))
+                    }
+                    Target::External => (
+                        format!("{}: {} (external)", relation.name, parsed.target),
+                        ExploreAction::Note("external link — not followed".into()),
+                    ),
+                    Target::UnresolvedId(id) => (
+                        format!("{}: {id} (unresolved id)", relation.name),
+                        ExploreAction::Note("this id has no live registry entry".into()),
+                    ),
+                    Target::AmbiguousAlias(name) => (
+                        format!("{}: {name} (ambiguous alias)", relation.name),
+                        ExploreAction::Note("several documents share this title".into()),
+                    ),
+                };
+                actions.push((label, String::new(), action));
+            }
+        }
+
+        if let Some(inbound) = backlinks.get(&current) {
+            for backlink in inbound {
+                let by = if backlink.by_id { "id" } else { "path" };
+                actions.push((
+                    format!("← {} [{}]", backlink.source.display(), backlink.site),
+                    format!("linked from, by {by}"),
+                    ExploreAction::Goto(backlink.source.clone()),
+                ));
+            }
+        }
+
+        if !history.is_empty() {
+            actions.push(("Back".into(), "the previous document".into(), ExploreAction::Back));
+        }
+        actions.push(("Quit".into(), String::new(), ExploreAction::Quit));
+
+        let header = if title.is_empty() {
+            current.display().to_string()
+        } else {
+            format!("{} — {title}", current.display())
+        };
+        let mut menu = cliclack::select(header);
+        for (i, (label, hint, _)) in actions.iter().enumerate() {
+            menu = menu.item(i, label, hint);
+        }
+        // Any error (including a Ctrl-C / Esc cancel) leaves the explorer.
+        let Ok(choice) = menu.interact() else { break };
+
+        match &actions[choice].2 {
+            ExploreAction::View => page_text(&text)?,
+            ExploreAction::Edit => edit_file(&full)?,
+            ExploreAction::Goto(p) => {
+                history.push(current.clone());
+                current = p.clone();
+            }
+            ExploreAction::Note(message) => eprintln!("colophon: {message}"),
+            ExploreAction::Back => {
+                if let Some(prev) = history.pop() {
+                    current = prev;
+                }
+            }
+            ExploreAction::Quit => break,
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The title a linked document declares (its `title` frontmatter), else a title
+/// derived from its filename — the label an explore menu shows for a link.
+fn doc_title(ctx: &Ctx, rel: &Path) -> String {
+    load(&ctx.root_dir.join(rel))
+        .ok()
+        .and_then(|(_, d)| d.meta.get("title").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_else(|| link::path_to_title(rel))
+}
+
+/// Page `text` through `$PAGER` (default `less`), falling back to a plain print
+/// when no pager can be spawned.
+fn page_text(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let mut parts = pager.split_whitespace();
+    let Some(program) = parts.next() else {
+        print!("{text}");
+        return Ok(());
+    };
+    let spawned = std::process::Command::new(program)
+        .args(parts)
+        .stdin(std::process::Stdio::piped())
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            child.wait()?;
+        }
+        Err(_) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// Open `path` in `$EDITOR`/`$VISUAL` (default `vi`), inheriting the terminal.
+fn edit_file(path: &Path) -> std::io::Result<()> {
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let mut parts = editor.split_whitespace();
+    let program = parts.next().unwrap_or("vi");
+    std::process::Command::new(program).args(parts).arg(path).status()?;
+    Ok(())
 }
 
 fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {

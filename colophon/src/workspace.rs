@@ -276,7 +276,7 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
     /// the flat scan was written to avoid). An overlay alias to an *orphan* (a doc
     /// no path/id link reaches) likewise falls outside the scope and reads as
     /// broken — which it effectively is.
-    pub(crate) async fn title_index_scoped(&self, start: &Path) -> Result<TitleIndex> {
+    pub async fn title_index_scoped(&self, start: &Path) -> Result<TitleIndex> {
         let (dirs, needs_full) = self.title_scope(start).await?;
         if needs_full {
             return self.title_index().await;
