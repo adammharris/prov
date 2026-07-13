@@ -127,6 +127,12 @@ enum Command {
         /// be asked on a terminal (and to leave them unlinked otherwise).
         #[arg(long, value_enum)]
         adopt: Option<AdoptArg>,
+        /// Also give the directory's *non-document* files (images, PDFs, data,
+        /// binaries) each a metadata sidecar, linked under the root. Omit to be
+        /// asked on a terminal; non-interactive leaves them alone (they stay
+        /// invisible to `colophon check` until attached).
+        #[arg(long)]
+        attach: bool,
         /// Accept every default without prompting.
         #[arg(long, short = 'y')]
         yes: bool,
@@ -211,6 +217,32 @@ enum Command {
         /// The parent document (gains a spanning link to the new file).
         #[arg(long, short)]
         parent: PathBuf,
+    },
+    /// Give an arbitrary file (an image, a PDF, any binary) workspace-linked
+    /// metadata: write a sidecar `<file>.yaml` beside it carrying its title,
+    /// links, and any ID, and link it as a child of a parent. The file's bytes
+    /// are never read or rewritten — only linked, moved, and validated with it.
+    Attach {
+        /// The file to attach. Anything colophon can't read as a document; a
+        /// readable document should be created with `new` (it carries its own
+        /// metadata) rather than shadowed by a sidecar. Omit with `--all`.
+        payload: Option<PathBuf>,
+        /// The parent document that gains a spanning link to the attachment
+        /// (default: the workspace root).
+        #[arg(long, short)]
+        parent: Option<PathBuf>,
+        /// Attach every loose file under the workspace — each opaque file that
+        /// has no sidecar yet — instead of a single payload. Bounded to the
+        /// directories the workspace already reaches (an unlinked subtree, a
+        /// nested workspace, is left alone); pass `--recursive` to sweep the whole
+        /// tree. Mutually exclusive with a positional file.
+        #[arg(long)]
+        all: bool,
+        /// With `--all`, descend into every directory, including ones nothing
+        /// links to yet — the full recursive sweep rather than the reachability-
+        /// bounded default.
+        #[arg(long)]
+        recursive: bool,
     },
     /// Move/rename a document, maintaining every affected link: every inbound
     /// reference across the workspace (parent entry, children's inverses,
@@ -688,6 +720,7 @@ fn main() -> ExitCode {
             identity,
             id_storage,
             adopt,
+            attach,
             yes,
         } => cmd_init(
             dir.as_deref(),
@@ -702,6 +735,7 @@ fn main() -> ExitCode {
             identity,
             id_storage,
             adopt,
+            attach,
             yes,
         ),
         Command::Set { file, key, value } => cmd_set(&file, &key, &value),
@@ -709,6 +743,9 @@ fn main() -> ExitCode {
         Command::Tree { root } => cmd_tree(root.as_deref()),
         Command::Check { root, fix } => cmd_check(root.as_deref(), fix),
         Command::New { path, parent } => cmd_new(&path, &parent),
+        Command::Attach { payload, parent, all, recursive } => {
+            cmd_attach(payload.as_deref(), parent.as_deref(), all, recursive)
+        }
         Command::Mv { from, to } => cmd_mv(&from, &to),
         Command::Rm { path, force } => cmd_rm(&path, force),
         Command::Id { file } => cmd_id(&file),
@@ -1059,41 +1096,47 @@ struct FoundDoc {
 
 /// Classify `dir` for `init`: detect an already-initialized workspace (an
 /// `index.*` root or a `colophon.*` config beside it), else scan the content
-/// documents present and decide loose-vs-structured-vs-greenfield.
-fn classify_dir(dir: &Path) -> DirState {
+/// documents present and decide loose-vs-structured-vs-greenfield. The second
+/// return is every loose *non-document* file (an image, a PDF, a binary, source
+/// code — anything colophon cannot read as text) — the population `init` can
+/// offer to attach. Empty for an already-initialized directory (`init` aborts).
+fn classify_dir(dir: &Path) -> (DirState, Vec<PathBuf>) {
     // An existing root (`index.<content|meta-ext>`) or config sidecar
     // (`colophon.<meta-ext>`) at the top level means this is already a workspace.
     for ext in ROOT_EXTS.iter().chain(META_EXTS) {
         let marker = dir.join(format!("index.{ext}"));
         if marker.exists() {
-            return DirState::Initialized { marker };
+            return (DirState::Initialized { marker }, Vec::new());
         }
     }
     for ext in META_EXTS {
         let marker = dir.join(format!("{CONFIG_STEM}.{ext}"));
         if marker.exists() {
-            return DirState::Initialized { marker };
+            return (DirState::Initialized { marker }, Vec::new());
         }
     }
 
     let mut docs = Vec::new();
-    scan_docs(dir, Path::new(""), &mut docs);
-    if docs.is_empty() {
-        return DirState::Greenfield;
-    }
-    if docs.iter().any(|d| d.structural) {
+    let mut others = Vec::new();
+    scan_docs(dir, Path::new(""), &mut docs, &mut others);
+    let state = if docs.is_empty() {
+        DirState::Greenfield
+    } else if docs.iter().any(|d| d.structural) {
         let root = pick_root_candidate(&docs);
         DirState::Structured { docs: docs.into_iter().map(|d| d.rel).collect(), root }
     } else {
         DirState::LooseContent { docs: docs.into_iter().map(|d| d.rel).collect() }
-    }
+    };
+    (state, others)
 }
 
-/// Recursively collect content documents under `dir` (rooted at workspace-relative
-/// `rel`), reading each one's frontmatter for the structural / root-candidate
-/// facts. Hidden entries (`.`-prefixed) are skipped, mirroring the library's
-/// scans; unreadable or unparsable files count as plain (non-structural) content.
-fn scan_docs(dir: &Path, rel: &Path, out: &mut Vec<FoundDoc>) {
+/// Recursively collect, under `dir` (rooted at workspace-relative `rel`), the
+/// content documents (into `docs`, reading each one's frontmatter for the
+/// structural / root-candidate facts) and the loose *opaque* files (into
+/// `others` — anything [`colophon::is_opaque_payload`] treats as bytes). Hidden
+/// entries (`.`-prefixed) are skipped, mirroring the library's scans; unreadable
+/// or unparsable content files count as plain (non-structural) content.
+fn scan_docs(dir: &Path, rel: &Path, docs: &mut Vec<FoundDoc>, others: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -1105,7 +1148,7 @@ fn scan_docs(dir: &Path, rel: &Path, out: &mut Vec<FoundDoc>) {
         let child_rel = rel.join(name);
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
-            scan_docs(&child, &child_rel, out);
+            scan_docs(&child, &child_rel, docs, others);
             continue;
         }
         let is_content = child
@@ -1113,6 +1156,12 @@ fn scan_docs(dir: &Path, rel: &Path, out: &mut Vec<FoundDoc>) {
             .and_then(|e| e.to_str())
             .is_some_and(|e| ROOT_EXTS.contains(&e.to_ascii_lowercase().as_str()));
         if !is_content {
+            // A non-document file colophon cannot read (image, PDF, data, code)
+            // is an attachment candidate; a whole-file metadata file (`.yaml`,
+            // `.json`) is neither content nor opaque, so it is simply ignored.
+            if colophon::is_opaque_payload(&child_rel) {
+                others.push(child_rel);
+            }
             continue;
         }
         // Diaryx vocabulary: `contents` (down) / `part_of` (up). Matches
@@ -1127,7 +1176,7 @@ fn scan_docs(dir: &Path, rel: &Path, out: &mut Vec<FoundDoc>) {
                 (structural, !has_part_of)
             })
             .unwrap_or((false, false));
-        out.push(FoundDoc { rel: child_rel, structural, root_candidate });
+        docs.push(FoundDoc { rel: child_rel, structural, root_candidate });
     }
 }
 
@@ -1175,6 +1224,7 @@ fn cmd_init(
     identity: Option<IdentityArg>,
     id_storage: Option<IdStorageArg>,
     adopt: Option<AdoptArg>,
+    attach: bool,
     yes: bool,
 ) -> CmdResult {
     let dir = match dir {
@@ -1198,7 +1248,8 @@ fn cmd_init(
     // terminal is asked. `None` here means "leave them unlinked".
     let mut loose_docs: Vec<PathBuf> = Vec::new();
     let mut adopt_mode: Option<AdoptArg> = None;
-    match classify_dir(&dir) {
+    let (dir_state, loose_others) = classify_dir(&dir);
+    match dir_state {
         DirState::Greenfield => {}
         DirState::Initialized { marker } => {
             return Err(format!(
@@ -1241,8 +1292,14 @@ fn cmd_init(
                 Some(AdoptArg::Mirror) => adopt_mode = Some(AdoptArg::Mirror),
                 Some(AdoptArg::None_) => {}
                 None if interactive => {
+                    // Mention the non-document files too, so the picture is whole
+                    // (they get their own attach question after this one).
+                    let others_note = match loose_others.len() {
+                        0 => String::new(),
+                        m => format!(" (plus {m} non-document file(s))"),
+                    };
                     let mut menu = cliclack::select(format!(
-                        "{n} existing document(s) here aren't part of a colophon workspace — what should init do?"
+                        "{n} existing document(s){others_note} here aren't part of a colophon workspace — what should init do?"
                     ));
                     if nested {
                         menu = menu.item(
@@ -1286,6 +1343,28 @@ fn cmd_init(
                 }
             }
             loose_docs = docs;
+        }
+    }
+
+    // Non-document files (images, PDFs, data, code) can each get a workspace
+    // metadata sidecar — a decision separate from the document structure above,
+    // and deliberately conservative: attaching is opt-in because an unattached
+    // opaque file is invisible to the (reachability-bounded) `check`, so there is
+    // nothing to force. The `--attach` flag opts in; a terminal is asked (default
+    // *leave*); `--yes` without the flag leaves them alone.
+    let mut attach_others = false;
+    if !loose_others.is_empty() {
+        let m = loose_others.len();
+        if attach {
+            attach_others = true;
+        } else if interactive {
+            let choice = cliclack::select(format!(
+                "{m} non-document file(s) here (images, PDFs, data, code) — give them workspace metadata?"
+            ))
+            .item("leave", "Leave unlinked", "invisible to colophon until you attach them")
+            .item("attach", "Attach each", "write a metadata sidecar beside each, linked under the root")
+            .interact()?;
+            attach_others = choice == "attach";
         }
     }
 
@@ -1524,9 +1603,9 @@ fn cmd_init(
     // workspace we just wrote, so a registry is bootstrapped first when the links
     // will mint IDs (as `new` does).
     let mut adopt_note = String::new();
-    if let Some(strategy) = adopt_mode
-        && !loose_docs.is_empty()
-    {
+    let do_adopt = adopt_mode.is_some() && !loose_docs.is_empty();
+    let do_attach = attach_others && !loose_others.is_empty();
+    if do_adopt || do_attach {
         let mut ctx = Ctx {
             root_dir: dir.clone(),
             root_doc: PathBuf::from(&root_name),
@@ -1543,8 +1622,8 @@ fn cmd_init(
         let mut ws = workspace(&ctx)?;
         // `mirror` needs a combined-document root; if the interview chose a
         // separated root, fall back to flat rather than abort a written workspace.
-        let strategy = match strategy {
-            AdoptArg::Mirror => match block_on(ws.plan_mirror(&ctx.root_doc)) {
+        let strategy = match adopt_mode.filter(|_| do_adopt) {
+            Some(AdoptArg::Mirror) => match block_on(ws.plan_mirror(&ctx.root_doc)) {
                 Ok(plan) => {
                     let outcome = block_on(ws.apply_plan(&plan))?;
                     for (doc, why) in &outcome.skipped {
@@ -1562,7 +1641,7 @@ fn cmd_init(
                     Some(AdoptArg::Flat)
                 }
             },
-            other => Some(other),
+            other => other,
         };
         if let Some(AdoptArg::Flat) = strategy {
             let mut adopted = 0usize;
@@ -1573,6 +1652,21 @@ fn cmd_init(
                 }
             }
             adopt_note = format!("\nadopted {adopted} existing document(s) under {root_name}");
+        }
+        // Attachments: a metadata sidecar for each opaque file, flat under the
+        // root (a folder-aware placement would need mirror's node map; the flat
+        // link resolves from anywhere).
+        if do_attach {
+            let mut attached = 0usize;
+            for payload in &loose_others {
+                match block_on(ws.attach(payload, &ctx.root_doc)) {
+                    Ok(_) => attached += 1,
+                    Err(e) => eprintln!("colophon: could not attach {}: {e}", payload.display()),
+                }
+            }
+            adopt_note.push_str(&format!(
+                "\nattached {attached} non-document file(s) under {root_name}"
+            ));
         }
         persist(&ctx, &mut ws)?;
     }
@@ -2033,6 +2127,79 @@ fn cmd_new(path: &Path, parent: &Path) -> CmdResult {
         }
         None => println!("created {} (in {})", path.display(), parent.display()),
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Attach an arbitrary file — or, with `--all`, every loose file under the
+/// workspace — minting a metadata sidecar and linking it under a parent
+/// (default: the workspace root). Mirrors [`cmd_new`] — an id-registering
+/// reference style or an eager policy mints IDs, so a registry is ensured first.
+fn cmd_attach(
+    payload: Option<&Path>,
+    parent: Option<&Path>,
+    all: bool,
+    recursive: bool,
+) -> CmdResult {
+    let mut ctx = find_root()?;
+    let link_registers = ctx.config.reference_style().registers()
+        || ctx.config.resolved_relation_styles().values().any(|s| s.registers());
+    let mints = (link_registers && ctx.config.identity.fires_on(Trigger::Link))
+        || ctx.config.identity.fires_on(Trigger::Create);
+    if mints {
+        ensure_registry(&mut ctx)?;
+    }
+    // Default the parent to the workspace root — the common "attach this to my
+    // workspace" case needs no `--parent`.
+    let parent_rel = match parent {
+        Some(p) => ws_rel(&ctx, p)?,
+        None => ctx.root_doc.clone(),
+    };
+    if recursive && !all {
+        return Err("--recursive only applies with --all".into());
+    }
+    let mut ws = workspace(&ctx)?;
+
+    if all {
+        if payload.is_some() {
+            return Err("pass a file or --all, not both".into());
+        }
+        // Bounded to reached directories by default; `--recursive` sweeps the
+        // whole tree (a pure asset dump you know is all attachments).
+        let loose = if recursive {
+            block_on(ws.loose_attachments())?
+        } else {
+            block_on(ws.loose_attachments_in(&ctx.root_doc))?
+        };
+        if loose.is_empty() {
+            println!("no loose files to attach");
+            return Ok(ExitCode::SUCCESS);
+        }
+        let mut attached = 0usize;
+        for p in &loose {
+            match block_on(ws.attach(p, &parent_rel)) {
+                Ok(node) => {
+                    println!("attached {} (sidecar {})", p.display(), node.display());
+                    attached += 1;
+                }
+                Err(e) => eprintln!("colophon: could not attach {}: {e}", p.display()),
+            }
+        }
+        persist(&ctx, &mut ws)?;
+        println!("attached {attached} file(s) under {}", parent_rel.display());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let Some(payload) = payload else {
+        return Err("specify a file to attach, or pass --all".into());
+    };
+    let node = block_on(ws.attach(&ws_rel(&ctx, payload)?, &parent_rel))?;
+    persist(&ctx, &mut ws)?;
+    println!(
+        "attached {} (sidecar {} in {})",
+        payload.display(),
+        node.display(),
+        parent_rel.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
