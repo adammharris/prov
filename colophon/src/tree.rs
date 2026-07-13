@@ -63,9 +63,13 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
     /// `contents: alias` vocabulary) descend like any other.
     pub async fn tree(&self, start: impl AsRef<Path>) -> Result<Node> {
         let start = link::normalize(start);
-        let titles = self.title_index().await?;
+        // The title index is built lazily — only if a nominal (`[[alias]]`) link
+        // is actually encountered. A path/id workspace never needs it, so it never
+        // pays for a full-workspace scan (which, at the root of a larger repo,
+        // would read every file under `target/`, vendored trees, and the rest).
+        let mut titles: Option<crate::title::TitleIndex> = None;
         let mut trail: Vec<PathBuf> = Vec::new();
-        self.tree_node(start, None, &titles, &mut trail).await
+        self.tree_node(start, None, &mut titles, &mut trail).await
     }
 
     /// Read and parse the workspace-relative document at `path`, returning the
@@ -81,7 +85,7 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
         &'a self,
         path: PathBuf,
         label: Option<String>,
-        titles: &'a crate::title::TitleIndex,
+        titles: &'a mut Option<crate::title::TitleIndex>,
         trail: &'a mut Vec<PathBuf>,
     ) -> Pin<Box<dyn Future<Output = Result<Node>> + 'a>> {
         Box::pin(async move {
@@ -121,7 +125,12 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
             let mut children = Vec::new();
             for raw in self.relations().children(&doc.meta) {
                 let child = Link::parse(&raw);
-                let child_path = match self.resolve_link_with(&path, &child, Some(titles)) {
+                // Build the title index on first sight of a nominal link, never
+                // before — this is the only place the tree walk can need it.
+                if titles.is_none() && crate::title::is_alias_shaped(&child.target) {
+                    *titles = Some(self.title_index().await?);
+                }
+                let child_path = match self.resolve_link_with(&path, &child, titles.as_ref()) {
                     Target::External => continue,
                     Target::UnresolvedId(id) => {
                         children.push(Node {
@@ -146,6 +155,8 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
                     Target::Path(p) => p,
                 };
                 children.push(self.tree_node(child_path, child.label, titles, trail).await?);
+                // (titles carried by &mut, so a nominal link deeper in the tree
+                // reuses the index built above rather than rescanning.)
             }
             trail.pop();
 

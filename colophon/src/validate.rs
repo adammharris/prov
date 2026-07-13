@@ -515,9 +515,11 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         let mut visited = BTreeSet::new();
         let mut queue = vec![link::normalize(start)];
 
-        // The nominal-resolution index, built once for the whole walk (a flat
-        // scan, independent of the link resolution it powers).
-        let titles = self.title_index().await?;
+        // The nominal-resolution index, built lazily — only if a `[[alias]]` link
+        // is actually encountered. A path/id workspace never scans (which, at the
+        // root of a larger repo, would read every file under `target/`, vendored
+        // trees, and the rest — the reported multi-second `tree`/`check`).
+        let mut titles: Option<TitleIndex> = None;
 
         let spanning = self.relations().spanning_relation().map(str::to_owned);
         let inverse = spanning.as_deref().and_then(|s| {
@@ -578,7 +580,10 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 // Parse once: `link.target` is the bare target (any `[label](…)`
                 // stripped), which is what both the census and findings record.
                 let link = Link::parse(&edge.target);
-                let resolution = self.resolve_forward(&path, &link, &titles).await;
+                if titles.is_none() && title::is_alias_shaped(&link.target) {
+                    titles = Some(self.title_index().await?);
+                }
+                let resolution = self.resolve_forward(&path, &link, titles.as_ref()).await;
 
                 if Some(edge.relation.as_str()) == spanning.as_deref()
                     && let Some(resolved) = resolution.resolved_path().cloned()
@@ -594,16 +599,20 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                             && let Ok((_, child_doc)) = self.load(&resolved).await
                             && child_doc.has_meta()
                         {
-                            let points_back = child_doc
-                                .meta
-                                .get(inverse)
-                                .map(Value::link_strings)
-                                .unwrap_or_default()
-                                .iter()
-                                .any(|t| {
-                                    self.resolve_link_with(&resolved, &Link::parse(t), Some(&titles))
-                                        == Target::Path(path.clone())
-                                });
+                            let inverse_targets =
+                                child_doc.meta.get(inverse).map(Value::link_strings).unwrap_or_default();
+                            // Build the title index if a nominal inverse link needs it.
+                            if titles.is_none()
+                                && inverse_targets
+                                    .iter()
+                                    .any(|t| title::is_alias_shaped(&Link::parse(t).target))
+                            {
+                                titles = Some(self.title_index().await?);
+                            }
+                            let points_back = inverse_targets.iter().any(|t| {
+                                self.resolve_link_with(&resolved, &Link::parse(t), titles.as_ref())
+                                    == Target::Path(path.clone())
+                            });
                             if !points_back {
                                 structural.push(Finding::MissingInverse {
                                     doc: path.clone(),
@@ -626,8 +635,11 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
 
             // Body wikilinks — overlay references, censused but never spanning.
             for wikilink in link::scan_wikilinks(&path, &doc.body) {
-                let resolution =
-                    self.resolve_forward(&path, &Link::parse(&wikilink.target), &titles).await;
+                let wl = Link::parse(&wikilink.target);
+                if titles.is_none() && title::is_alias_shaped(&wl.target) {
+                    titles = Some(self.title_index().await?);
+                }
+                let resolution = self.resolve_forward(&path, &wl, titles.as_ref()).await;
                 census.push(CensusEntry {
                     source: path.clone(),
                     site: LinkSite::Body(wikilink.span),
@@ -673,7 +685,12 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// `Unique` to the on-disk path, `Ambiguous` to
     /// [`Resolution::AmbiguousAlias`], `Unknown` falling through to a path (so a
     /// nominal link to nothing reports as `Broken`, like any dead link).
-    async fn resolve_forward(&self, source: &Path, link: &Link, titles: &TitleIndex) -> Resolution {
+    async fn resolve_forward(
+        &self,
+        source: &Path,
+        link: &Link,
+        titles: Option<&TitleIndex>,
+    ) -> Resolution {
         if link.is_external() {
             return Resolution::External;
         }
@@ -686,7 +703,10 @@ impl<FS: Storage, IdP, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 None => Resolution::DanglingId { tombstoned: self.index().is_known(&id), id },
             };
         }
-        if title::is_alias_shaped(&link.target) {
+        // Only a nominal link needs the title index; the caller builds it lazily
+        // the first time one appears, so `titles` is `Some` here whenever it is
+        // consulted. If absent, fall through to path resolution.
+        if let Some(titles) = titles.filter(|_| title::is_alias_shaped(&link.target)) {
             match titles.resolve(&link.target) {
                 TitleMatch::Unique(path) => {
                     return match self.exact_name(&path).await {
