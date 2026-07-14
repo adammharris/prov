@@ -161,6 +161,39 @@ defaults. `link_format` precedence: config doc > root frontmatter (diaryx compat
   small reserved-relation spine; a derived-index cache (Route C) is the next
   instance. Also: refactor `ensure_registry` to share this bootstrap shape.
 
+## Config conversion (per-file `convert`)
+
+Established: setting a config axis governs *new* documents; a parallel **`convert`
+mutation** reconciles *existing* ones — the workspace can "restate itself" in a
+different style/format/grammar while structure is preserved (§6 reachability + §7
+format-agnosticism, made an action). Decided this session:
+
+- **Per-file by default (DESIGN §8), not workspace-wide.** `convert <file> <axis>
+  <value>` restyles only what *that* document declares; `-r` extends to its
+  spanning subtree (so `convert <root> … -r` is the whole-workspace case). No
+  `--all`. `-f`/force is reserved for the lossy/destructive directions. A mixed
+  style across the tree is valid and `check`-clean.
+- **One command surface over ~4 distinct engines** (not one uniform transform):
+  1. ✅ **Reference re-authoring** (`link_format`, and later `reference_wrapper/
+     target/label`, `relation_styles`) — re-spell links, frontmatter *and* body,
+     destination/label/wrapper preserved, id/external/alias skipped.
+     `Workspace::convert_link_style` + `restyle_frontmatter_links`/
+     `restyle_body_links`; CLI `convert <file> link_format <style> [-r]`. Only the
+     `link_format` axis so far; the other reference axes are the natural next add.
+  2. **Metadata language** (`embed_format` yaml↔fig↔json, `embed_style`) — reserialize
+     frontmatter via `meta::serialize_mapping`; `embed_style: separate` already *is*
+     `separate`/`combine`. Comment loss across formats is the caveat.
+  3. **Content transcode** (`content_format` md↔djot) — twig `Document::serialize`
+     transcodes (proven: md→djot), *plus* a `.md→.dj` rename whose inbound-link
+     cascade is `rename`'s existing job. The heavy, lossy one — gate behind `-f`.
+  4. **Identity migration** (`id_storage`, `identity`) — stamp/strip ids, build/drop
+     the registry; some directions destructive (identity→off breaks id links).
+- **Un-abstract until the 2nd engine (DESIGN §10 discipline).** `convert_link_style`
+  is a concrete method, not a `Migration` trait. Extract the shared plan-then-apply
+  seam (reuse the `StructurePlan` preview pattern) only when engine 2 lands to
+  justify it. `restyle_frontmatter_links` is a near-sibling of `rerelativize` (move
+  vs restyle); a shared `map_frontmatter_links(…, render)` could unify them then.
+
 ## Mutation
 
 - **`delete` autofix.** `delete` now *diagnoses* inbound danglers; optionally
@@ -203,10 +236,13 @@ defaults. `link_format` precedence: config doc > root frontmatter (diaryx compat
     tool, not merely a convenience.
   - **Scope — full port, including body `[text](path)` link resolution.** Two
     landable stages with a clean seam:
-    - *Stage 1 (twig-independent, can land now):* balanced-paren path parsing
-      (`find_closing_paren`), `convert_link(s)` + a `colophon relink --to <style>`
-      command for workspace-wide style migration, and the `plain_canonical` fix.
-      This alone lets diaryx drop the bulk of `link_parser.rs`.
+    - *Stage 1 (twig-independent):* the `plain_canonical` fix and balanced-paren
+      path parsing (`find_closing_paren`) for frontmatter/longer strings still
+      pending. ✅ The style *converter* landed as **per-file `convert`** (see
+      "Config conversion" below), not a workspace-wide `relink` — the `link_format`
+      axis is done; converting a diaryx `plain_canonical` workspace to
+      `markdown_root` (the cutover bridge) is now `convert <root> link_format
+      markdown_root -r`. Between these, diaryx can drop most of `link_parser.rs`.
     - ✅ *Stage 2 (body links) — done.* Real markdown/djot `[label](target)`
       links in body prose are now first-class alongside `[[wikilinks]]`.
       `content::link_spans` queries twig for `link`-node spans (code-aware:

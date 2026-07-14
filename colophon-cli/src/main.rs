@@ -283,6 +283,24 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Convert a document's own outbound links to a different config style —
+    /// today the `link_format` axis (how path targets are spelled:
+    /// `markdown_root` / `markdown_relative` / `plain_relative` / `plain_canonical`).
+    /// Only the spelling changes; each link's destination, label, and wrapper are
+    /// preserved, and id/external/alias targets are left untouched. Per file by
+    /// default (DESIGN §8) — links elsewhere pointing *at* this file are those
+    /// documents' to convert; `-r` also converts this file's spanning subtree.
+    Convert {
+        /// The document to convert.
+        file: PathBuf,
+        /// The config axis to convert. Currently only `link_format`.
+        axis: String,
+        /// The target value (e.g. `plain_relative`).
+        value: String,
+        /// Also convert every document in this file's spanning subtree.
+        #[arg(long, short)]
+        recursive: bool,
+    },
     /// Duplicate a document as a fresh sibling under the same parent, linking the
     /// copy in both directions. The copy takes the next free `-copy` name and
     /// carries the source's title, body, and metadata — but never its stable ID
@@ -783,6 +801,9 @@ fn main() -> ExitCode {
         Command::Mv { from, to } => cmd_mv(&from, &to),
         Command::Rm { path, force } => cmd_rm(&path, force),
         Command::Duplicate { source } => cmd_duplicate(&source),
+        Command::Convert { file, axis, value, recursive } => {
+            cmd_convert(&file, &axis, &value, recursive)
+        }
         Command::Id { file } => cmd_id(&file),
         Command::Resolve { id } => cmd_resolve(&id),
         Command::Backlinks { file } => cmd_backlinks(&file),
@@ -2760,6 +2781,31 @@ fn cmd_rm(path: &Path, force: bool) -> CmdResult {
     println!("deleted {}", path.display());
     for finding in &danglers {
         eprintln!("warning: now dangling — {finding}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResult {
+    let ctx = find_root()?;
+    let mut ws = workspace(&ctx)?;
+    match axis {
+        "link_format" | "link-format" => {
+            let style = LinkStyle::from_config_str(value).ok_or_else(|| {
+                format!(
+                    "unknown link_format `{value}` \
+                     (expected markdown_root|markdown_relative|plain_relative|plain_canonical)"
+                )
+            })?;
+            let n = block_on(ws.convert_link_style(&ws_rel(&ctx, file)?, style, recursive))?;
+            persist(&ctx, &mut ws)?;
+            println!("converted {n} document(s) to {} link style", style.as_config_str());
+        }
+        other => {
+            return Err(format!(
+                "convert: axis `{other}` is not supported yet (only `link_format`)"
+            )
+            .into());
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

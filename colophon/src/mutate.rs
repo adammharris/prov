@@ -771,6 +771,82 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         unreachable!("the copy-suffix search is unbounded")
     }
 
+    /// Convert the **path-form** links the document at `file` declares into
+    /// `style` — re-spelling each relative/absolute path target in the target
+    /// [`LinkStyle`](crate::link::LinkStyle) (root `/a`, relative `../a`, or bare
+    /// canonical `a`) while its resolved destination, label, and wrapper stay
+    /// exactly the same. Id-form, external, and nominal (alias) targets are left
+    /// untouched — `style` governs only how a *path* is written. Both frontmatter
+    /// relation links and body `[[…]]`/`[](…)` links are converted.
+    ///
+    /// **Per-file by default (DESIGN §8).** Converting `file` restyles only the
+    /// links *it* declares; links elsewhere pointing *at* `file` are those
+    /// documents' to convert (so a workspace can sit in a mixed style, which is
+    /// valid and `check`-clean). With `recursive`, the same conversion is applied
+    /// to every document in `file`'s spanning subtree. Returns the number of
+    /// documents actually rewritten.
+    pub async fn convert_link_style(
+        &mut self,
+        file: &Path,
+        style: crate::link::LinkStyle,
+        recursive: bool,
+    ) -> Result<usize> {
+        let file = link::normalize(file);
+        if !self.fs().try_exists(&self.root().join(&file)).await? {
+            return Err(Error::Structure(format!("{} does not exist", file.display())));
+        }
+        let targets =
+            if recursive { self.spanning_subtree(&file).await? } else { vec![file] };
+        let mut changed = 0;
+        for path in targets {
+            if self.restyle_document(&path, style).await? {
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Restyle every path link the document at `path` declares — frontmatter
+    /// relation entries then body links — writing the file only when something
+    /// changed. Returns whether it did. The body is spliced against `doc.body`
+    /// (verbatim, MetaEditor-preserved) after the frontmatter edit, the same
+    /// two-step `rename` uses.
+    async fn restyle_document(&self, path: &Path, style: crate::link::LinkStyle) -> Result<bool> {
+        let (text, doc) = self.load(path).await?;
+        let meta_rewritten =
+            restyle_frontmatter_links(&text, &doc, self.relations().relations(), path, style)?;
+        let final_text = restyle_body_links(&meta_rewritten, &doc.body, path, style);
+        if final_text != text {
+            self.fs().write(&self.root().join(path), final_text.as_bytes()).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Every document reachable from `root` down the spanning relation, `root`
+    /// included — the scope of a `recursive` per-file operation. A missing,
+    /// cyclic, or unreadable child simply stops that branch; the walk never
+    /// leaves the spanning tree.
+    async fn spanning_subtree(&self, root: &Path) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut queue = vec![root.to_path_buf()];
+        while let Some(path) = queue.pop() {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let Ok((_, doc)) = self.load(&path).await else { continue };
+            out.push(path.clone());
+            for raw in self.relations().children(&doc.meta) {
+                if let Target::Path(child) = self.resolve_link(&path, &Link::parse(&raw)) {
+                    queue.push(child);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Every document that links to `from` by a path, rewritten to point at `to`
     /// — the inbound half of a move. Reused by `rename`, `separate`, and
     /// `combine`. Id-form links are left untouched (the registry keeps them
@@ -1065,6 +1141,96 @@ fn rerelativize(
         }
     }
     editor.render()
+}
+
+/// Restyle every path-form frontmatter link `doc` declares into `style`,
+/// keeping its resolved destination, label, and wrapper — the frontmatter half
+/// of [`convert_link_style`](Workspace::convert_link_style). The sibling of
+/// [`rerelativize`], but where that recomputes a *relative* target for a move,
+/// this re-spells a stationary target in a chosen [`LinkStyle`]. Id-form,
+/// external, and nominal (alias) targets are skipped — `style` describes only
+/// how a path is written.
+fn restyle_frontmatter_links(
+    text: &str,
+    doc: &Document,
+    relations: &[crate::relation::Relation],
+    file: &Path,
+    style: crate::link::LinkStyle,
+) -> Result<String> {
+    let Some(carrier) = doc.carrier else {
+        return Ok(text.to_string()); // no metadata: nothing to restyle
+    };
+    let mut editor = MetaEditor::open(text, carrier)?;
+    let restyle = |raw: &str| -> Option<String> {
+        let link = Link::parse(raw);
+        if link.is_external()
+            || link.id_target().is_some()
+            || crate::title::is_alias_shaped(&link.target)
+        {
+            return None;
+        }
+        let resolved = link::resolve(file, &link.target);
+        Some(link.with_target(link::path_text(style, file, &resolved)).render())
+    };
+    for relation in relations {
+        let Some(value) = doc.meta.get(&relation.name) else {
+            continue;
+        };
+        match value {
+            Value::String(raw) => {
+                if let Some(updated) = restyle(raw) {
+                    editor.replace_value(&[Segment::Key(&relation.name)], fig::Value::Str(updated))?;
+                }
+            }
+            Value::Sequence(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    if let Some(raw) = item.as_str()
+                        && let Some(updated) = restyle(raw)
+                    {
+                        editor.replace_value(
+                            &[Segment::Key(&relation.name), Segment::Index(i)],
+                            fig::Value::Str(updated),
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    editor.render()
+}
+
+/// Restyle the path-form body links in `body` into `style`, splicing the result
+/// back into `text` — the body half of
+/// [`convert_link_style`](Workspace::convert_link_style), covering `[[…]]` and
+/// markdown/djot `[t](a)` links alike. Id-form, external, and alias targets are
+/// left alone. Returns `text` unchanged when nothing restyled.
+fn restyle_body_links(text: &str, body: &str, file: &Path, style: crate::link::LinkStyle) -> String {
+    if body.is_empty() {
+        return text.to_string();
+    }
+    let mut new_body = String::with_capacity(body.len());
+    let mut cursor = 0;
+    let mut rewrote = false;
+    for bl in link::scan_body_links(file, body) {
+        if bl.id_target().is_some()
+            || bl.link.is_external()
+            || crate::title::is_alias_shaped(&bl.link.target)
+        {
+            continue;
+        }
+        let resolved = link::resolve(file, &bl.link.target);
+        let retargeted = bl.link.with_target(link::path_text(style, file, &resolved)).render();
+        new_body.push_str(&body[cursor..bl.span.start]);
+        new_body.push_str(&retargeted);
+        cursor = bl.span.end;
+        rewrote = true;
+    }
+    if !rewrote {
+        return text.to_string();
+    }
+    new_body.push_str(&body[cursor..]);
+    splice_body(text, body, &new_body)
 }
 
 /// Re-relativize the path-form body links in a moved document's body —
@@ -1703,6 +1869,73 @@ mod tests {
         // Source body untouched, and the workspace validates.
         assert_eq!(read(&dir, "notes.md"), "Prose body, duplicated.\n");
         assert_eq!(block_on(ws(&dir).check("index.yaml")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn convert_restyles_one_files_links_leaving_the_rest_alone() {
+        // Per-file (DESIGN §8): converting mid.md restyles the links *it*
+        // declares — its `part_of` up and a body link — into plain_relative,
+        // preserving each destination and label. The root's inbound link to
+        // mid.md is untouched (that's the root's to convert), so the workspace
+        // sits in a valid mixed style.
+        let dir = tempdir("convert-linkstyle");
+        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- '[Mid](/sub/mid.md)'\n---\n");
+        write(
+            &dir,
+            "sub/mid.md",
+            "---\ntitle: Mid\npart_of: /index.md\n---\nSee [the leaf](/sub/leaf.md).\n",
+        );
+        write(&dir, "sub/leaf.md", "---\ntitle: Leaf\npart_of: /sub/mid.md\n---\n");
+
+        let n = block_on(
+            ws(&dir).convert_link_style(Path::new("sub/mid.md"), LinkStyle::PlainRelative, false),
+        )
+        .unwrap();
+        assert_eq!(n, 1, "only the one file converted");
+
+        let mid = read(&dir, "sub/mid.md");
+        // Up-link and body link now relative (destinations preserved, label kept).
+        assert!(mid.contains("part_of: ../index.md"), "{mid}");
+        assert!(mid.contains("[the leaf](leaf.md)"), "{mid}");
+        // The root's inbound link stays in its original root style — not this
+        // file's to convert.
+        assert!(read(&dir, "index.md").contains("[Mid](/sub/mid.md)"), "inbound untouched");
+        // And the mixed-style workspace still validates.
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn convert_recursive_covers_the_spanning_subtree_and_spares_id_and_external() {
+        // `-r` converts the file and its descendants. An `id:` link and an
+        // external URL are left exactly as written — link_format spells only
+        // *path* targets.
+        let dir = tempdir("convert-recursive");
+        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
+        write(
+            &dir,
+            "a.md",
+            "---\ntitle: A\npart_of: index.md\ncontents:\n- sub/b.md\n---\n\
+             See [ext](https://example.com) and [[id:ajp7eqb|pinned]].\n",
+        );
+        write(&dir, "sub/b.md", "---\ntitle: B\npart_of: ../a.md\n---\n");
+
+        let n = block_on(
+            ws(&dir).convert_link_style(Path::new("index.md"), LinkStyle::MarkdownRoot, true),
+        )
+        .unwrap();
+        assert_eq!(n, 3, "root + a + b all converted");
+
+        let a = read(&dir, "a.md");
+        // Path links became root-absolute.
+        assert!(a.contains("part_of: /index.md"), "{a}");
+        assert!(a.contains("- /sub/b.md"), "{a}");
+        // External and id targets untouched.
+        assert!(a.contains("[ext](https://example.com)"), "{a}");
+        assert!(a.contains("[[id:ajp7eqb|pinned]]"), "{a}");
+        assert!(read(&dir, "sub/b.md").contains("part_of: /a.md"), "descendant converted");
+        // (No `check` here: `ajp7eqb` is a deliberately fake id, which `check`
+        // would flag as malformed regardless of the conversion. The first
+        // convert test validates a clean workspace after converting.)
     }
 
     #[test]
