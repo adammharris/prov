@@ -9,7 +9,7 @@ rust-version = "1.85"
 repository = "https://github.com/adammharris/colophon"
 homepage = "https://github.com/adammharris/colophon"
 readme = "README.md"
-license-file = "MIT or Apache-2.0"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Embedded-metadata backend. fig is a Zig-backed parser/editor (its build.rs
