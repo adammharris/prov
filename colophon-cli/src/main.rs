@@ -2354,6 +2354,13 @@ fn cmd_explore(file: Option<&Path>) -> CmdResult {
         actions.push(("View this document".into(), "page the raw file".into(), ExploreAction::View));
         actions.push(("Edit in $EDITOR".into(), String::new(), ExploreAction::Edit));
 
+        // Documents already reachable from this screen by a forward link. A
+        // backlink whose source is in this set is the inverse of a link we
+        // already show — the child's `part_of` mirroring our `contents`, most
+        // often — and navigates to the same place, so it is suppressed below to
+        // keep a folder-note's menu from listing every child twice.
+        let mut forward_targets: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
         for relation in ws.relations().relations() {
             let Some(value) = doc.meta.get(&relation.name) else { continue };
             for raw in value.link_strings() {
@@ -2361,6 +2368,7 @@ fn cmd_explore(file: Option<&Path>) -> CmdResult {
                 let (label, action) = match ws.resolve_link_with(&current, &parsed, Some(&titles)) {
                     Target::Path(p) => {
                         let t = doc_title(&ctx, &p);
+                        forward_targets.insert(p.clone());
                         (format!("{}: {t}  ({})", relation.name, p.display()), ExploreAction::Goto(p))
                     }
                     Target::External => (
@@ -2382,6 +2390,13 @@ fn cmd_explore(file: Option<&Path>) -> CmdResult {
 
         if let Some(inbound) = backlinks.get(&current) {
             for backlink in inbound {
+                // Skip the inverse of a forward link already on this screen — the
+                // same document, reached the same way (a child's `part_of` echoing
+                // our `contents`). Genuinely-new backlinks (a `related` from a
+                // document we don't link to) are unaffected.
+                if forward_targets.contains(&backlink.source) {
+                    continue;
+                }
                 let by = if backlink.by_id { "id" } else { "path" };
                 actions.push((
                     format!("← {} [{}]", backlink.source.display(), backlink.site),
