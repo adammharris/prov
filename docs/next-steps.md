@@ -235,11 +235,13 @@ maintained); a two-line alias supplies the dates.
   perfectly good one. If title-matching spreads (`title.rs`'s index does the same
   job for aliases), this coercion should probably move there and be shared.
 - **An unlinked file in the way is an honest error, not a silent adopt.** `-p`
-  onto a route whose file already exists on disk but isn't linked fails with
-  `already exists` (from `create`). Correct — link-shaped containment means an
-  unlinked file isn't in the tree — but the fix is `adopt`, and the error doesn't
-  say so. Worth naming the remedy in the message. *(Partly addressed: `assert_vacant`
-  now names `adopt` and refuses during the plan rather than mid-write.)*
+  onto a route whose file already exists on disk but isn't linked now refuses
+  during the plan (`assert_vacant`) rather than mid-write. The old note here said
+  "the fix is `adopt`, and the error doesn't say so" — that was wrong twice over:
+  `adopt` is a library call and an `init` flag, **never a subcommand**, so naming it
+  would prescribe a cure the CLI cannot dispense. The message now states the problem
+  and offers only the remedy that exists (route to the title). Re-add the adopt
+  clause if and when `colophon adopt` is real — see below.
 - **`assert_vacant` refuses; it deliberately does not reuse.** A route segment that
   lands on a directory already holding a node stops with that node's title. The
   tempting next step — resolve the segment *to* that node — is the one thing this
@@ -253,6 +255,46 @@ maintained); a two-line alias supplies the dates.
   `assert_vacant` fires only where synthesis is *forced to pick a filename by
   slugging a title*, which is the one place the directory genuinely constrains the
   graph. Nowhere else should grow a version of this check.
+
+## Reparenting (`reparent`, `mv --in`)
+
+Landed. The axis it establishes, which is the part worth keeping straight:
+
+| verb | path | place in tree |
+| --- | --- | --- |
+| `mv A B` | **changes** | preserved |
+| `reparent A --in P` | preserved | **changes** |
+| `mv A B --in P` | changes | changes |
+
+The orthogonality *is* the design. Containment is link-shaped (§3), so a node may
+live in any directory and relocating the file is a separate decision — which is why
+`reparent` needs no `Layout` flag (moving is `mv`'s job) and why `mv --in` is pure
+convenience rather than a third concept. `mv` runs first inside it, because `rename`
+retargets inbound links and the reparent must then find the parent at the document's
+*new* path.
+
+`Workspace::reparent` is the verb `adopt` deliberately refuses to be: adopt is
+additive and declines a child that already claims a different parent ("a contested
+containment a human must resolve"); reparent *replaces* the claim. An unparented
+child is accepted, which makes reparent a superset — so `colophon adopt` was never
+added, since `reparent --in` already links an orphan.
+
+- **It is detectable, not atomic.** Three documents change and there is no journal,
+  so the writes are ordered by which failure `check` can see: repoint the child
+  (→ `MissingInverse` if it stops there), add the new entry (→ `DuplicateContainment`),
+  remove the old one last. Removing first would leave a child pointing at a parent
+  that forgot it — the one state in this set `check` does *not* look for, which is
+  exactly why it is last. A journal would make this moot; nothing else will.
+- **The cycle check is a walk, not a census.** Reparenting a node under its own
+  descendant is refused by walking `part_of` up from the new parent. Cheap and
+  bounded, but note *why* it must be refused rather than reported: the detached pair
+  still claims itself in both directions, so nothing looks broken from inside the
+  loop — it simply becomes unreachable, and per the orphan gap below, unreachable is
+  precisely what `check` cannot see.
+- **`reparent` moves one node, not a selection.** No `-r`, no globs; a subtree moves
+  by moving its root, which is the whole point of a spanning tree. Bulk reparenting
+  (every `2026-07-*` under a new month) is a shell loop today and probably should
+  stay one.
 
 ## Index naming is hardcoded in three places
 

@@ -341,8 +341,7 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
     async fn assert_vacant(&self, path: &Path, segment: &str, layout: Layout) -> Result<()> {
         if self.fs().try_exists(&self.root().join(path)).await? {
             return Err(Error::Structure(format!(
-                "route segment {segment:?} would create {}, but a file is already there; \
-                 `adopt` it if it belongs in the tree, or route to its title instead",
+                "route segment {segment:?} would create {}, but a file is already there",
                 path.display()
             )));
         }
@@ -384,9 +383,14 @@ impl<FS: Storage, Id, Ix: IndexStore> Workspace<FS, Id, Ix> {
             // The *segment* the caller typed, never the slug derived from it: the
             // slug is an implementation detail of file placement, and echoing it
             // back ("instead of \"daily\"") misnames what the user actually wrote.
+            // Only the title is offered as a remedy, because only the title is one.
+            // The tempting second clause — "or adopt it if it isn't linked" — names
+            // a command that does not exist: `adopt` is a library call and an `init`
+            // flag, never a subcommand. An error that prescribes a cure the CLI
+            // cannot dispense is worse than one that just states the problem.
             return Err(Error::Structure(format!(
                 "route segment {segment:?} would create {}, but {}{} is already a node there; \
-                 route to its title instead, or `adopt` it if it is not linked yet",
+                 route to its title instead",
                 path.display(),
                 rel.display(),
                 titled,

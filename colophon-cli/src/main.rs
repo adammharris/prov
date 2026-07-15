@@ -308,11 +308,64 @@ enum Command {
     /// Move/rename a document, maintaining every affected link: every inbound
     /// reference across the workspace (parent entry, children's inverses,
     /// overlay links, body wikilinks) and the document's own relative links.
+    ///
+    /// Moves the *file* and preserves the document's place in the tree. To change
+    /// its place in the tree instead, see `reparent` — or pass `--in`/`--under`
+    /// here to do both at once.
     Mv {
         /// Current path.
         from: PathBuf,
         /// New path.
         to: PathBuf,
+        /// Also reparent under this document — the file moves *and* changes
+        /// parent. Equivalent to `mv` followed by `reparent`.
+        #[arg(long = "in", short = 'i', value_name = "DOC")]
+        in_doc: Option<PathBuf>,
+        /// Also reparent under the node this route addresses (titles separated by
+        /// `/`, walked from the workspace root).
+        #[arg(long, short = 'u', value_name = "ROUTE", conflicts_with = "in_doc")]
+        under: Option<String>,
+        /// Create missing route segments (with `--under`), like `mkdir -p`.
+        #[arg(long = "parents", short = 'p', requires = "under")]
+        parents: bool,
+        /// Where `--parents` writes the nodes it synthesizes. Placement only —
+        /// never the graph.
+        #[arg(long, value_enum, default_value_t = LayoutArg::Nested, requires = "parents")]
+        layout: LayoutArg,
+    },
+    /// Change a document's parent in the containment tree, leaving the file where
+    /// it is.
+    ///
+    /// The complement of `mv`: `mv` changes a document's path and preserves its
+    /// place in the tree; `reparent` changes its place in the tree and preserves
+    /// its path. Containment is link-shaped, not directory-shaped, so a node may
+    /// live in any directory — moving the file is a separate decision (`mv`, or
+    /// `mv --in` to do both).
+    ///
+    /// The old parent's entry is removed and the new one's added, so the document
+    /// is never contained twice. An unparented document is accepted: there is
+    /// nothing to remove, so this simply links it in.
+    #[command(group(ArgGroup::new("destination").required(true).args(["in_doc", "under"])))]
+    Reparent {
+        /// Path of the document to reparent.
+        path: PathBuf,
+        /// The new parent document.
+        #[arg(long = "in", short = 'i', value_name = "DOC")]
+        in_doc: Option<PathBuf>,
+        /// The new parent, addressed by route (titles separated by `/`, walked
+        /// from the workspace root).
+        #[arg(long, short = 'u', value_name = "ROUTE")]
+        under: Option<String>,
+        /// Create missing route segments (with `--under`), like `mkdir -p`.
+        #[arg(long = "parents", short = 'p', requires = "under")]
+        parents: bool,
+        /// Where `--parents` writes the nodes it synthesizes. Placement only —
+        /// never the graph.
+        #[arg(long, value_enum, default_value_t = LayoutArg::Nested, requires = "parents")]
+        layout: LayoutArg,
+        /// Show what the route resolves to without changing anything.
+        #[arg(long, requires = "under")]
+        dry_run: bool,
     },
     /// Delete a document, removing its parent's spanning entry. Refuses when
     /// the document has children unless --force.
@@ -845,7 +898,17 @@ fn main() -> ExitCode {
         Command::Attach { payload, parent, all, recursive } => {
             cmd_attach(payload.as_deref(), parent.as_deref(), all, recursive)
         }
-        Command::Mv { from, to } => cmd_mv(&from, &to),
+        Command::Mv { from, to, in_doc, under, parents, layout } => {
+            cmd_mv(&from, &to, in_doc.as_deref(), under.as_deref(), parents, layout.into())
+        }
+        Command::Reparent { path, in_doc, under, parents, layout, dry_run } => cmd_reparent(
+            &path,
+            in_doc.as_deref(),
+            under.as_deref(),
+            parents,
+            layout.into(),
+            dry_run,
+        ),
         Command::Rm { path, force } => cmd_rm(&path, force),
         Command::Duplicate { source } => cmd_duplicate(&source),
         Command::Convert { file, axis, value, recursive } => {
@@ -2699,6 +2762,66 @@ fn prompt(message: &str) -> Result<String, AnyError> {
 /// Print a route plan without applying it: what resolved, what is missing, and
 /// where the missing nodes would land. Shared by `--dry-run` and the error a
 /// missing route raises without `-p`, so the two describe the plan identically.
+/// Resolve a `--in DOC` / `--under ROUTE` placement to the parent document it
+/// names. `Ok(None)` means the caller should stop having already printed
+/// something the user asked for (a `--dry-run` preview).
+///
+/// Shared by `new`, `reparent`, and `mv`, because a route is only ever another
+/// way to *name* a parent — never a different kind of operation. Extracted at the
+/// third caller rather than the second: `new` alone justified nothing, but three
+/// copies of the -p/--dry-run policy would drift, and the drift would be silent
+/// (each command deciding on its own what a missing segment means).
+///
+/// Synthesized nodes are `create`d, so they mint IDs on the same terms as any
+/// other document — a caller that mints must `ensure_registry` *before* this runs,
+/// not merely before its own write.
+fn resolve_placement(
+    ctx: &Ctx,
+    ws: &mut Workspace<StdFs, Minter, FileIndex>,
+    in_doc: Option<&Path>,
+    under: Option<&str>,
+    parents: bool,
+    layout: Layout,
+    dry_run: bool,
+) -> Result<Option<PathBuf>, AnyError> {
+    let Some(route) = under else {
+        let path = in_doc.expect("clap requires --in or --under");
+        return Ok(Some(ws_rel(ctx, path)?));
+    };
+    let segments = Workspace::<StdFs>::route_segments(route);
+    let plan = block_on(ws.plan_route(&ctx.root_doc, &segments, layout))?;
+    if dry_run {
+        show_route_plan(route, &plan);
+        if plan.is_complete() {
+            println!("\nnothing to create; the route resolves to {}", plan.terminal.display());
+        } else if !parents {
+            println!("\n{} segment(s) missing — re-run with -p to create them", plan.synthesize.len());
+        }
+        return Ok(None);
+    }
+    if !plan.is_complete() && !parents {
+        // Name the first missing segment and where the walk got to: the useful
+        // half of the error is *how far* the route resolved.
+        let missing = &plan.synthesize[0];
+        return Err(format!(
+            "route {route:?} stops at {}: no child titled {:?}\n\
+             re-run with -p to create the missing segment(s), or --dry-run to preview",
+            missing.parent.display(),
+            missing.title,
+        )
+        .into());
+    }
+    let created = plan.synthesize.len();
+    let terminal = block_on(ws.apply_route(&plan))?;
+    for synth in &plan.synthesize {
+        println!("created {} ({:?})", synth.path.display(), synth.title);
+    }
+    if created > 0 {
+        persist(ctx, ws)?;
+    }
+    Ok(Some(terminal))
+}
+
 fn show_route_plan(route: &str, plan: &RoutePlan) {
     println!("route {route:?}");
     for (depth, node) in plan.resolved.iter().enumerate() {
@@ -2751,43 +2874,10 @@ fn cmd_new(
     // of this function is unchanged — a route is just another way to *name* a
     // parent, never a different kind of creation.
     let mut ws = workspace(&ctx)?;
-    let parent_rel = match (in_doc, under) {
-        (Some(path), _) => ws_rel(&ctx, path)?,
-        (None, Some(route)) => {
-            let segments = Workspace::<StdFs>::route_segments(route);
-            let plan = block_on(ws.plan_route(&ctx.root_doc, &segments, layout))?;
-            if dry_run {
-                show_route_plan(route, &plan);
-                if plan.is_complete() {
-                    println!("\nnothing to create; {title:?} would go under {}", plan.terminal.display());
-                } else if !parents {
-                    println!("\n{} segment(s) missing — re-run with -p to create them", plan.synthesize.len());
-                }
-                return Ok(ExitCode::SUCCESS);
-            }
-            if !plan.is_complete() && !parents {
-                // Name the first missing segment and where the walk got to: the
-                // useful half of the error is *how far* the route resolved.
-                let missing = &plan.synthesize[0];
-                return Err(format!(
-                    "route {route:?} stops at {}: no child titled {:?}\n\
-                     re-run with -p to create the missing segment(s), or --dry-run to preview",
-                    missing.parent.display(),
-                    missing.title,
-                )
-                .into());
-            }
-            let created_nodes = plan.synthesize.len();
-            let terminal = block_on(ws.apply_route(&plan))?;
-            for synth in &plan.synthesize {
-                println!("created {} ({:?})", synth.path.display(), synth.title);
-            }
-            if created_nodes > 0 {
-                persist(&ctx, &mut ws)?;
-            }
-            terminal
-        }
-        (None, None) => unreachable!("clap's `placement` group requires --in or --under"),
+    let Some(parent_rel) =
+        resolve_placement(&ctx, &mut ws, in_doc, under, parents, layout, dry_run)?
+    else {
+        return Ok(ExitCode::SUCCESS);
     };
 
     // The new document's path: an explicit `--as` wins; otherwise a readable
@@ -2892,12 +2982,80 @@ fn cmd_attach(
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_mv(from: &Path, to: &Path) -> CmdResult {
-    let ctx = find_root()?;
+fn cmd_mv(
+    from: &Path,
+    to: &Path,
+    in_doc: Option<&Path>,
+    under: Option<&str>,
+    parents: bool,
+    layout: Layout,
+) -> CmdResult {
+    let mut ctx = find_root()?;
+    // `rename` mints nothing, but `--under -p` synthesizes nodes with `create`,
+    // which does — so a registry has to exist before the route runs, exactly as in
+    // `new`/`reparent`. Plain `mv` skips this and stays as cheap as it was.
+    if in_doc.is_some() || under.is_some() {
+        let link_registers = ctx.config.reference_style().registers()
+            || ctx.config.resolved_relation_styles().values().any(|s| s.registers());
+        let mints = (link_registers && ctx.config.identity.fires_on(Trigger::Link))
+            || ctx.config.identity.fires_on(Trigger::Create);
+        if mints {
+            ensure_registry(&mut ctx)?;
+        }
+    }
     let mut ws = workspace(&ctx)?;
-    block_on(ws.rename(&ws_rel(&ctx, from)?, &ws_rel(&ctx, to)?))?;
-    persist(&ctx, &mut ws)?;
+    let to_rel = ws_rel(&ctx, to)?;
+    block_on(ws.rename(&ws_rel(&ctx, from)?, &to_rel))?;
     println!("moved {} -> {}", from.display(), to.display());
+
+    // The move first, then the reparent — in that order because `rename` has
+    // already retargeted every inbound link, so the parent the reparent removes is
+    // found at the document's *new* path. Doing it the other way would reparent a
+    // path that is about to stop existing.
+    if in_doc.is_some() || under.is_some() {
+        let Some(parent_rel) =
+            resolve_placement(&ctx, &mut ws, in_doc, under, parents, layout, false)?
+        else {
+            return Ok(ExitCode::SUCCESS);
+        };
+        block_on(ws.reparent(&to_rel, &parent_rel))?;
+        println!("reparented {} -> in {}", to.display(), parent_rel.display());
+    }
+    persist(&ctx, &mut ws)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_reparent(
+    path: &Path,
+    in_doc: Option<&Path>,
+    under: Option<&str>,
+    parents: bool,
+    layout: Layout,
+    dry_run: bool,
+) -> CmdResult {
+    let mut ctx = find_root()?;
+    // A route's synthesized nodes are `create`d and so mint on the same terms as
+    // any other document — the registry must exist before the route is applied.
+    // (The reparent itself authors links too, which an id-authoring workspace
+    // registers.)
+    let link_registers = ctx.config.reference_style().registers()
+        || ctx.config.resolved_relation_styles().values().any(|s| s.registers());
+    let mints = (link_registers && ctx.config.identity.fires_on(Trigger::Link))
+        || ctx.config.identity.fires_on(Trigger::Create);
+    if mints && !dry_run {
+        ensure_registry(&mut ctx)?;
+    }
+
+    let mut ws = workspace(&ctx)?;
+    let Some(parent_rel) =
+        resolve_placement(&ctx, &mut ws, in_doc, under, parents, layout, dry_run)?
+    else {
+        return Ok(ExitCode::SUCCESS);
+    };
+    let path_rel = ws_rel(&ctx, path)?;
+    block_on(ws.reparent(&path_rel, &parent_rel))?;
+    persist(&ctx, &mut ws)?;
+    println!("reparented {} -> in {}", path_rel.display(), parent_rel.display());
     Ok(ExitCode::SUCCESS)
 }
 

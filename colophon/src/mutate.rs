@@ -145,7 +145,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // Refuse if either file (the node, or a separated body) already exists.
         for existing in std::iter::once(&node).chain(body.iter()) {
             if self.fs().try_exists(&self.root().join(existing)).await? {
-                return Err(Error::Structure(format!("{} already exists", existing.display())));
+                return Err(Error::Structure(format!(
+                    "{} already exists",
+                    existing.display()
+                )));
             }
         }
 
@@ -153,7 +156,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // from its stem) and the parent's (its own title, else derived from the
         // path).
         let title = title_override.map(str::to_owned).unwrap_or_else(|| {
-            node.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
+            node.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
         });
         let parent_title = parent_doc
             .meta
@@ -165,11 +170,15 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // The child's inverse link back to the parent, authored in the `inverse`
         // relation's style (going "up"). The parent exists, so an id link
         // registers it by path.
-        let up = self.authored_target(&inverse, &node, &parent, &parent_title, true).await?;
+        let up = self
+            .authored_target(&inverse, &node, &parent, &parent_title, true)
+            .await?;
         // The parent's spanning entry for the child, authored in the `spanning`
         // relation's style (going "down"). The node is not on disk yet, so
         // `target_exists = false` mints its id directly rather than register-by-path.
-        let down = self.authored_target(&spanning, &parent, &node, &title, false).await?;
+        let down = self
+            .authored_target(&spanning, &parent, &node, &title, false)
+            .await?;
 
         // Author the node's metadata: title, inverse link, and — for a separated
         // child — a `content` pointer at its body file. A separated node is
@@ -211,13 +220,17 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         if let Some(dir) = self.root().join(&node).parent() {
             self.fs().create_dir_all(dir).await?;
         }
-        self.fs().write(&self.root().join(&node), new_text.as_bytes()).await?;
+        self.fs()
+            .write(&self.root().join(&node), new_text.as_bytes())
+            .await?;
         // A separated child's prose file starts empty (like a combined child's
         // body, which is just the synthesized block with nothing after it).
         if let Some(body_path) = &body {
             self.fs().write(&self.root().join(body_path), b"").await?;
         }
-        self.fs().write(&self.root().join(&parent), parent_out.as_bytes()).await?;
+        self.fs()
+            .write(&self.root().join(&parent), parent_out.as_bytes())
+            .await?;
 
         // Identity hook — eager policies assign an ID from birth (idempotent: an
         // id-linked child was already registered above).
@@ -247,13 +260,19 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         let child = link::normalize(child);
         let parent = link::normalize(parent);
         if child == parent {
-            return Err(Error::Structure(format!("{} cannot contain itself", parent.display())));
+            return Err(Error::Structure(format!(
+                "{} cannot contain itself",
+                parent.display()
+            )));
         }
         let (spanning, inverse) = self.spanning_pair()?;
 
         for existing in [&child, &parent] {
             if !self.fs().try_exists(&self.root().join(existing)).await? {
-                return Err(Error::Structure(format!("{} does not exist", existing.display())));
+                return Err(Error::Structure(format!(
+                    "{} does not exist",
+                    existing.display()
+                )));
             }
         }
 
@@ -265,10 +284,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // clobber a deliberate parent claim.
         let already_up = match child_doc.meta.get(&inverse) {
             Some(existing) => {
-                let points_here = existing
-                    .link_strings()
-                    .iter()
-                    .any(|t| self.resolve_link(&child, &Link::parse(t)) == Target::Path(parent.clone()));
+                let points_here = existing.link_strings().iter().any(|t| {
+                    self.resolve_link(&child, &Link::parse(t)) == Target::Path(parent.clone())
+                });
                 if !points_here {
                     return Err(Error::Structure(format!(
                         "{} already declares {inverse} to a different parent — resolve the \
@@ -281,11 +299,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             None => false,
         };
         // Down: does the parent's spanning field already resolve to the child?
-        let already_down = self
-            .relations()
-            .children(&parent_doc.meta)
-            .iter()
-            .any(|t| self.resolve_link(&parent, &Link::parse(t)) == Target::Path(child.clone()));
+        let already_down =
+            self.relations().children(&parent_doc.meta).iter().any(|t| {
+                self.resolve_link(&parent, &Link::parse(t)) == Target::Path(child.clone())
+            });
 
         if already_up && already_down {
             return Ok(());
@@ -308,22 +325,195 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // existing document (its body is untouched), in the `inverse` relation's
         // reference style — the parent exists, so an id link registers it by path.
         if !already_up {
-            let up = self.authored_target(&inverse, &child, &parent, &parent_title, true).await?;
-            let updated =
-                crate::edit::set_in_text(&child_text, child_doc.carrier, &inverse, fig::Value::Str(up))?;
-            self.fs().write(&self.root().join(&child), updated.as_bytes()).await?;
+            let up = self
+                .authored_target(&inverse, &child, &parent, &parent_title, true)
+                .await?;
+            let updated = crate::edit::set_in_text(
+                &child_text,
+                child_doc.carrier,
+                &inverse,
+                fig::Value::Str(up),
+            )?;
+            self.fs()
+                .write(&self.root().join(&child), updated.as_bytes())
+                .await?;
         }
         // The parent's spanning entry going down (the child exists on disk, so an
         // id link registers it by path). Append to the sequence, creating it if
         // the parent had no spanning field yet.
         if !already_down {
-            let down = self.authored_target(&spanning, &parent, &child, &child_title, true).await?;
+            let down = self
+                .authored_target(&spanning, &parent, &child, &child_title, true)
+                .await?;
             let mut parent_editor = MetaEditor::open_or_init(&parent_text, parent_doc.carrier)?;
             let span_path = [Segment::Key(&spanning)];
-            if parent_editor.append_value(&span_path, fig::Value::Str(down.clone())).is_err() {
-                parent_editor.set_value(&span_path, fig::Value::Seq(vec![fig::Value::Str(down)]))?;
+            if parent_editor
+                .append_value(&span_path, fig::Value::Str(down.clone()))
+                .is_err()
+            {
+                parent_editor
+                    .set_value(&span_path, fig::Value::Seq(vec![fig::Value::Str(down)]))?;
             }
-            self.fs().write(&self.root().join(&parent), parent_editor.render()?.as_bytes()).await?;
+            self.fs()
+                .write(
+                    &self.root().join(&parent),
+                    parent_editor.render()?.as_bytes(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Move the document at `child` to a different `parent` in the containment
+    /// tree, leaving the file exactly where it is.
+    ///
+    /// The mirror image of [`rename`](Self::rename), and deliberately orthogonal
+    /// to it: `rename` changes a document's **path** and preserves its place in
+    /// the tree; `reparent` changes its **place in the tree** and preserves its
+    /// path. Neither implies the other, because containment is link-shaped rather
+    /// than directory-shaped (DESIGN §3) — a node may live in any directory, so
+    /// relocating the file is a separate decision and a separate call.
+    ///
+    /// Distinct from [`adopt`](Self::adopt), which is *additive* and refuses a
+    /// child that already claims a different parent. This is the verb for that
+    /// refusal's other half: it *replaces* the claim, removing the old parent's
+    /// spanning entry rather than leaving a document contained twice. An
+    /// unparented child is accepted too, in which case there is nothing to remove
+    /// and the effect is exactly `adopt`'s.
+    ///
+    /// ## Failure leaves a *detectable* state, not an atomic one
+    ///
+    /// Three documents change, and colophon has no journal — so a crash between
+    /// writes cannot be prevented, only made loud. The writes are therefore
+    /// ordered so that every window is a finding `check` already reports:
+    /// repointing the child first leaves the old parent claiming a child that
+    /// does not claim it back ([`Finding::MissingInverse`]); adding the new entry
+    /// before removing the old leaves the child contained twice
+    /// ([`Finding::DuplicateContainment`]). Removing the old entry first would
+    /// instead leave a child pointing up at a parent that has forgotten it — the
+    /// one inconsistency in this set that `check` does *not* look for, so it is
+    /// deliberately the last write rather than the first.
+    pub async fn reparent(&mut self, child: &Path, parent: &Path) -> Result<()> {
+        let child = link::normalize(child);
+        let parent = link::normalize(parent);
+        if child == parent {
+            return Err(Error::Structure(format!(
+                "{} cannot contain itself",
+                parent.display()
+            )));
+        }
+        let (spanning, inverse) = self.spanning_pair()?;
+        for existing in [&child, &parent] {
+            if !self.fs().try_exists(&self.root().join(existing)).await? {
+                return Err(Error::Structure(format!(
+                    "{} does not exist",
+                    existing.display()
+                )));
+            }
+        }
+
+        // Refuse a cycle: walking up from the *new* parent must not arrive at the
+        // child. Reparenting a node beneath its own descendant would sever the
+        // pair from the tree entirely — both would still claim each other, so
+        // nothing would look broken from inside the loop, and a spanning walk from
+        // the root would simply never reach them again.
+        let mut rung = parent.clone();
+        let mut seen = BTreeSet::new();
+        while seen.insert(rung.clone()) {
+            if rung == child {
+                return Err(Error::Structure(format!(
+                    "cannot reparent {} into {} — {} is contained by it, so the move would \
+                     detach both from the tree",
+                    child.display(),
+                    parent.display(),
+                    parent.display(),
+                )));
+            }
+            let Ok((_, doc)) = self.load(&rung).await else {
+                break;
+            };
+            match self.single_target(&doc, &inverse, &rung) {
+                Some(up) => rung = up,
+                None => break,
+            }
+        }
+
+        let (child_text, child_doc) = self.load(&child).await?;
+        let old_parent = self.single_target(&child_doc, &inverse, &child);
+        if old_parent.as_ref() == Some(&parent) {
+            // Already there. Idempotent like `adopt`, and for the same reason: a
+            // caller re-running a script should not have to ask first.
+            return Ok(());
+        }
+
+        let child_title = child_doc
+            .meta
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| link::path_to_title(&child));
+        let (parent_text, parent_doc) = self.load(&parent).await?;
+        let parent_title = parent_doc
+            .meta
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| link::path_to_title(&parent));
+
+        // 1. The child's inverse, repointed up at the new parent.
+        let up = self
+            .authored_target(&inverse, &child, &parent, &parent_title, true)
+            .await?;
+        let updated = crate::edit::set_in_text(
+            &child_text,
+            child_doc.carrier,
+            &inverse,
+            fig::Value::Str(up),
+        )?;
+        self.fs()
+            .write(&self.root().join(&child), updated.as_bytes())
+            .await?;
+
+        // 2. The new parent's spanning entry, appended (created if it had none).
+        let already_down =
+            self.relations().children(&parent_doc.meta).iter().any(|t| {
+                self.resolve_link(&parent, &Link::parse(t)) == Target::Path(child.clone())
+            });
+        if !already_down {
+            let down = self
+                .authored_target(&spanning, &parent, &child, &child_title, true)
+                .await?;
+            let mut editor = MetaEditor::open_or_init(&parent_text, parent_doc.carrier)?;
+            let span_path = [Segment::Key(&spanning)];
+            if editor
+                .append_value(&span_path, fig::Value::Str(down.clone()))
+                .is_err()
+            {
+                editor.set_value(&span_path, fig::Value::Seq(vec![fig::Value::Str(down)]))?;
+            }
+            self.fs()
+                .write(&self.root().join(&parent), editor.render()?.as_bytes())
+                .await?;
+        }
+
+        // 3. The old parent's entry, removed last (see the ordering note above).
+        // Re-read it here: when the old parent *is* the new parent's neighbour in
+        // some earlier write, the text on disk is what must be edited, not the
+        // copy loaded before step 2.
+        if let Some(old) = &old_parent
+            && old != &parent
+        {
+            let (old_text, old_doc) = self.load(old).await?;
+            if let (Some(index), Some(carrier)) = (
+                self.entry_index(&old_doc, &spanning, old, &child),
+                old_doc.carrier,
+            ) {
+                let mut editor = MetaEditor::open(&old_text, carrier)?;
+                editor.remove_item(&[Segment::Key(&spanning)], index)?;
+                self.fs()
+                    .write(&self.root().join(old), editor.render()?.as_bytes())
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -350,7 +540,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         let to = link::normalize(to);
 
         if !self.fs().try_exists(&self.root().join(&from)).await? {
-            return Err(Error::Structure(format!("{} does not exist", from.display())));
+            return Err(Error::Structure(format!(
+                "{} does not exist",
+                from.display()
+            )));
         }
         if self.fs().try_exists(&self.root().join(&to)).await? {
             return Err(Error::Structure(format!("{} already exists", to.display())));
@@ -373,8 +566,13 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         //    frontmatter links, then the body wikilinks (whose spans MetaEditor
         //    leaves verbatim, so they can be spliced afterwards).
         let mut self_text = if from.parent() != to.parent() {
-            let meta_rewritten =
-                rerelativize(&from_text, &from_doc, self.relations().relations(), &from, &to)?;
+            let meta_rewritten = rerelativize(
+                &from_text,
+                &from_doc,
+                self.relations().relations(),
+                &from,
+                &to,
+            )?;
             rerelativize_body_links(&meta_rewritten, &from_doc.body, &from, &to)
         } else {
             from_text
@@ -384,7 +582,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             && let Some(carrier) = from_doc.carrier
         {
             let mut editor = MetaEditor::open(&self_text, carrier)?;
-            editor.replace_value(&[Segment::Key("content")], fig::Value::Str(mv.new_ref.clone()))?;
+            editor.replace_value(
+                &[Segment::Key("content")],
+                fig::Value::Str(mv.new_ref.clone()),
+            )?;
             self_text = editor.render()?;
         }
 
@@ -392,18 +593,28 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         if let Some(dir) = self.root().join(&to).parent() {
             self.fs().create_dir_all(dir).await?;
         }
-        self.fs().rename(&self.root().join(&from), &self.root().join(&to)).await?;
-        self.fs().write(&self.root().join(&to), self_text.as_bytes()).await?;
+        self.fs()
+            .rename(&self.root().join(&from), &self.root().join(&to))
+            .await?;
+        self.fs()
+            .write(&self.root().join(&to), self_text.as_bytes())
+            .await?;
         if let Some(mv) = &body_move {
-            self.fs().rename(&self.root().join(&mv.from), &self.root().join(&mv.to)).await?;
+            self.fs()
+                .rename(&self.root().join(&mv.from), &self.root().join(&mv.to))
+                .await?;
             // A prose body is rewritten with its re-relativized text; an opaque
             // payload (`text` is `None`) is left exactly as the rename moved it.
             if let Some(text) = &mv.text {
-                self.fs().write(&self.root().join(&mv.to), text.as_bytes()).await?;
+                self.fs()
+                    .write(&self.root().join(&mv.to), text.as_bytes())
+                    .await?;
             }
         }
         for (source, text) in inbound_writes {
-            self.fs().write(&self.root().join(&source), text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(&source), text.as_bytes())
+                .await?;
         }
 
         // Identity hook — the registry follows the move, so every
@@ -465,19 +676,27 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                         && matches!(&e.site, LinkSite::Relation(r) if *r == spanning))
             })
             .map(|e| match e.resolution {
-                Resolution::Id { id, .. } => {
-                    Finding::DanglingId { doc: e.source, site: e.site, id, tombstoned: true }
-                }
-                _ => Finding::BrokenLink { doc: e.source, site: e.site, target: e.target_text },
+                Resolution::Id { id, .. } => Finding::DanglingId {
+                    doc: e.source,
+                    site: e.site,
+                    id,
+                    tombstoned: true,
+                },
+                _ => Finding::BrokenLink {
+                    doc: e.source,
+                    site: e.site,
+                    target: e.target_text,
+                },
             })
             .collect();
 
         let mut parent_write: Option<(PathBuf, String)> = None;
         if let Some(parent) = &parent {
             let (parent_text, parent_doc) = self.load(parent).await?;
-            if let (Some(index), Some(carrier)) =
-                (self.entry_index(&parent_doc, &spanning, parent, &path), parent_doc.carrier)
-            {
+            if let (Some(index), Some(carrier)) = (
+                self.entry_index(&parent_doc, &spanning, parent, &path),
+                parent_doc.carrier,
+            ) {
                 let mut editor = MetaEditor::open(&parent_text, carrier)?;
                 editor.remove_item(&[Segment::Key(&spanning)], index)?;
                 parent_write = Some((parent.clone(), editor.render()?));
@@ -494,7 +713,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             self.fs().remove_file(&self.root().join(&body)).await?;
         }
         if let Some((parent, text)) = parent_write {
-            self.fs().write(&self.root().join(&parent), text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(&parent), text.as_bytes())
+                .await?;
         }
 
         // Identity hook — retire the ID (a tombstoning store keeps it known
@@ -515,7 +736,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     pub async fn separate(&mut self, path: &Path) -> Result<PathBuf> {
         let path = link::normalize(path);
         if !self.fs().try_exists(&self.root().join(&path)).await? {
-            return Err(Error::Structure(format!("{} does not exist", path.display())));
+            return Err(Error::Structure(format!(
+                "{} does not exist",
+                path.display()
+            )));
         }
         let (_, doc) = self.load(&path).await?;
         let Some(MetaCarrier::Fenced(kind)) = doc.carrier else {
@@ -525,10 +749,16 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             )));
         };
         if doc.content_attr().is_some() {
-            return Err(Error::Structure(format!("{} is already separated", path.display())));
+            return Err(Error::Structure(format!(
+                "{} is already separated",
+                path.display()
+            )));
         }
         let Some(mapping) = doc.meta.as_mapping() else {
-            return Err(Error::Structure(format!("{} has no metadata to separate", path.display())));
+            return Err(Error::Structure(format!(
+                "{} has no metadata to separate",
+                path.display()
+            )));
         };
         let format = kind.inner_format();
         let meta_path = path.with_extension(crate::document::whole_file_extension(format));
@@ -539,7 +769,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             )));
         }
         if self.fs().try_exists(&self.root().join(&meta_path)).await? {
-            return Err(Error::Structure(format!("{} already exists", meta_path.display())));
+            return Err(Error::Structure(format!(
+                "{} already exists",
+                meta_path.display()
+            )));
         }
         let body_ref = path
             .file_name()
@@ -557,10 +790,16 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // Inbound links now point at the metadata file (the structural node).
         let inbound = self.collect_inbound_rewrites(&path, &meta_path).await?;
 
-        self.fs().write(&self.root().join(&meta_path), meta_text.as_bytes()).await?;
-        self.fs().write(&self.root().join(&path), body_text.as_bytes()).await?;
+        self.fs()
+            .write(&self.root().join(&meta_path), meta_text.as_bytes())
+            .await?;
+        self.fs()
+            .write(&self.root().join(&path), body_text.as_bytes())
+            .await?;
         for (source, text) in inbound {
-            self.fs().write(&self.root().join(&source), text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(&source), text.as_bytes())
+                .await?;
         }
         if let Some(id) = self.index().id_for_path(&path) {
             self.index_mut().set_path(&id, &meta_path);
@@ -589,7 +828,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             )));
         };
         let Some(mapping) = doc.meta.as_mapping() else {
-            return Err(Error::Structure(format!("{} has no metadata", path.display())));
+            return Err(Error::Structure(format!(
+                "{} has no metadata",
+                path.display()
+            )));
         };
         if !self.fs().try_exists(&self.root().join(&content)).await? {
             return Err(Error::Structure(format!(
@@ -620,10 +862,14 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // Inbound links point back at the (now combined) content file.
         let inbound = self.collect_inbound_rewrites(&path, &content).await?;
 
-        self.fs().write(&self.root().join(&content), combined.as_bytes()).await?;
+        self.fs()
+            .write(&self.root().join(&content), combined.as_bytes())
+            .await?;
         self.fs().remove_file(&self.root().join(&path)).await?;
         for (source, text) in inbound {
-            self.fs().write(&self.root().join(&source), text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(&source), text.as_bytes())
+                .await?;
         }
         if let Some(id) = self.index().id_for_path(&path) {
             self.index_mut().set_path(&id, &content);
@@ -657,7 +903,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     pub async fn duplicate(&mut self, source: &Path) -> Result<PathBuf> {
         let source = link::normalize(source);
         if !self.fs().try_exists(&self.root().join(&source)).await? {
-            return Err(Error::Structure(format!("{} does not exist", source.display())));
+            return Err(Error::Structure(format!(
+                "{} does not exist",
+                source.display()
+            )));
         }
         let (source_text, doc) = self.load(&source).await?;
         let (spanning, inverse) = self.spanning_pair()?;
@@ -678,7 +927,8 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             let _ = editor.delete(&[Segment::Key("id")]);
             let _ = editor.delete(&[Segment::Key(&spanning)]);
             if let Some((_, new_ref)) = &body_dest {
-                editor.replace_value(&[Segment::Key("content")], fig::Value::Str(new_ref.clone()))?;
+                editor
+                    .replace_value(&[Segment::Key("content")], fig::Value::Str(new_ref.clone()))?;
             }
             editor.render()?
         } else {
@@ -699,11 +949,17 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .unwrap_or_else(|| link::path_to_title(&dest));
-            let down = self.authored_target(&spanning, parent, &dest, &copy_title, false).await?;
+            let down = self
+                .authored_target(&spanning, parent, &dest, &copy_title, false)
+                .await?;
             let mut parent_editor = MetaEditor::open_or_init(&parent_text, parent_doc.carrier)?;
             let span_path = [Segment::Key(&spanning)];
-            if parent_editor.append_value(&span_path, fig::Value::Str(down.clone())).is_err() {
-                parent_editor.set_value(&span_path, fig::Value::Seq(vec![fig::Value::Str(down)]))?;
+            if parent_editor
+                .append_value(&span_path, fig::Value::Str(down.clone()))
+                .is_err()
+            {
+                parent_editor
+                    .set_value(&span_path, fig::Value::Seq(vec![fig::Value::Str(down)]))?;
             }
             Some((parent.clone(), parent_editor.render()?))
         } else {
@@ -715,13 +971,17 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         if let Some(dir) = self.root().join(&dest).parent() {
             self.fs().create_dir_all(dir).await?;
         }
-        self.fs().write(&self.root().join(&dest), copy_text.as_bytes()).await?;
+        self.fs()
+            .write(&self.root().join(&dest), copy_text.as_bytes())
+            .await?;
         if let (Some(body_from), Some((body_to, _))) = (&body_from, &body_dest) {
             let bytes = self.fs().read(&self.root().join(body_from)).await?;
             self.fs().write(&self.root().join(body_to), &bytes).await?;
         }
         if let Some((parent, text)) = parent_write {
-            self.fs().write(&self.root().join(&parent), text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(&parent), text.as_bytes())
+                .await?;
         }
 
         // Identity hook — an eager policy assigns the copy an ID from birth
@@ -749,7 +1009,11 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         })?;
         let ext = source.extension().and_then(|e| e.to_str());
         for n in 1.. {
-            let suffix = if n == 1 { "-copy".to_string() } else { format!("-copy-{n}") };
+            let suffix = if n == 1 {
+                "-copy".to_string()
+            } else {
+                format!("-copy-{n}")
+            };
             let name = match ext {
                 Some(ext) => format!("{stem}{suffix}.{ext}"),
                 None => format!("{stem}{suffix}"),
@@ -793,10 +1057,16 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     ) -> Result<usize> {
         let file = link::normalize(file);
         if !self.fs().try_exists(&self.root().join(&file)).await? {
-            return Err(Error::Structure(format!("{} does not exist", file.display())));
+            return Err(Error::Structure(format!(
+                "{} does not exist",
+                file.display()
+            )));
         }
-        let targets =
-            if recursive { self.spanning_subtree(&file).await? } else { vec![file] };
+        let targets = if recursive {
+            self.spanning_subtree(&file).await?
+        } else {
+            vec![file]
+        };
         let mut changed = 0;
         for path in targets {
             if self.restyle_document(&path, style).await? {
@@ -817,7 +1087,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             restyle_frontmatter_links(&text, &doc, self.relations().relations(), path, style)?;
         let final_text = restyle_body_links(&meta_rewritten, &doc.body, path, style);
         if final_text != text {
-            self.fs().write(&self.root().join(path), final_text.as_bytes()).await?;
+            self.fs()
+                .write(&self.root().join(path), final_text.as_bytes())
+                .await?;
             Ok(true)
         } else {
             Ok(false)
@@ -836,7 +1108,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             if !seen.insert(path.clone()) {
                 continue;
             }
-            let Ok((_, doc)) = self.load(&path).await else { continue };
+            let Ok((_, doc)) = self.load(&path).await else {
+                continue;
+            };
             out.push(path.clone());
             for raw in self.relations().children(&doc.meta) {
                 if let Target::Path(child) = self.resolve_link(&path, &Link::parse(&raw)) {
@@ -914,7 +1188,12 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
                 raw
             })
         };
-        Ok(Some(BodyMove { from: body_from, to: body_to, new_ref, text }))
+        Ok(Some(BodyMove {
+            from: body_from,
+            to: body_to,
+            new_ref,
+            text,
+        }))
     }
 
     /// The spanning relation's name and its inverse — mutations need both.
@@ -939,7 +1218,12 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// on-workspace path (by relative path or through the registry).
     /// (`doc_path` anchors a relative target.)
     fn single_target(&self, doc: &Document, field: &str, doc_path: &Path) -> Option<PathBuf> {
-        let raw = doc.meta.get(field).map(Value::link_strings)?.into_iter().next()?;
+        let raw = doc
+            .meta
+            .get(field)
+            .map(Value::link_strings)?
+            .into_iter()
+            .next()?;
         match self.resolve_link(doc_path, &Link::parse(&raw)) {
             Target::Path(p) => Some(p),
             _ => None,
@@ -948,7 +1232,13 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
 
     /// The index of the entry in `doc`'s `field` sequence whose target
     /// resolves to `wanted` — by relative path or through the registry.
-    fn entry_index(&self, doc: &Document, field: &str, doc_path: &Path, wanted: &Path) -> Option<usize> {
+    fn entry_index(
+        &self,
+        doc: &Document,
+        field: &str,
+        doc_path: &Path,
+        wanted: &Path,
+    ) -> Option<usize> {
         doc.meta
             .get(field)
             .map(Value::link_strings)?
@@ -1012,7 +1302,9 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         let mut current = from.to_path_buf();
         let mut seen = BTreeSet::new();
         while seen.insert(current.clone()) {
-            let Ok((_, doc)) = self.load(&current).await else { break };
+            let Ok((_, doc)) = self.load(&current).await else {
+                break;
+            };
             match self.single_target(&doc, inverse, &current) {
                 Some(parent) => current = parent,
                 None => break,
@@ -1035,7 +1327,11 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     ) -> Result<Option<String>> {
         let (original, doc0) = self.load(source).await?;
         let mut text = rewrite_body_inbound(&original, &doc0.body, source, from, to);
-        let mut doc = if text != original { Document::parse(source, &text)? } else { doc0 };
+        let mut doc = if text != original {
+            Document::parse(source, &text)?
+        } else {
+            doc0
+        };
         for relation in self.relations().relations() {
             if let Some(updated) =
                 self.retarget_entry(&text, &doc, &relation.name, source, from, to)?
@@ -1073,13 +1369,23 @@ struct BodyMove {
 /// and [`Workspace::duplicate`].
 fn body_sibling(node_to: &Path, body_from: &Path) -> (PathBuf, String) {
     let body_to = if crate::document::is_opaque_payload(body_from) {
-        let stem = node_to.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let stem = node_to
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         node_to.with_file_name(stem)
     } else {
-        let ext = body_from.extension().and_then(|e| e.to_str()).unwrap_or("md");
+        let ext = body_from
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("md");
         node_to.with_extension(ext)
     };
-    let new_ref = body_to.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    let new_ref = body_to
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
     (body_to, new_ref)
 }
 
@@ -1117,12 +1423,17 @@ fn rerelativize(
                 return None;
             }
             let resolved = link::resolve(from, &target.target);
-            Some(target.with_target(link::relative(new_dir, &resolved)).render())
+            Some(
+                target
+                    .with_target(link::relative(new_dir, &resolved))
+                    .render(),
+            )
         };
         match value {
             Value::String(raw) => {
                 if let Some(updated) = rewrite(raw) {
-                    editor.replace_value(&[Segment::Key(&relation.name)], fig::Value::Str(updated))?;
+                    editor
+                        .replace_value(&[Segment::Key(&relation.name)], fig::Value::Str(updated))?;
                 }
             }
             Value::Sequence(items) => {
@@ -1170,7 +1481,10 @@ fn restyle_frontmatter_links(
             return None;
         }
         let resolved = link::resolve(file, &link.target);
-        Some(link.with_target(link::path_text(style, file, &resolved)).render())
+        Some(
+            link.with_target(link::path_text(style, file, &resolved))
+                .render(),
+        )
     };
     for relation in relations {
         let Some(value) = doc.meta.get(&relation.name) else {
@@ -1179,7 +1493,8 @@ fn restyle_frontmatter_links(
         match value {
             Value::String(raw) => {
                 if let Some(updated) = restyle(raw) {
-                    editor.replace_value(&[Segment::Key(&relation.name)], fig::Value::Str(updated))?;
+                    editor
+                        .replace_value(&[Segment::Key(&relation.name)], fig::Value::Str(updated))?;
                 }
             }
             Value::Sequence(items) => {
@@ -1205,7 +1520,12 @@ fn restyle_frontmatter_links(
 /// [`convert_link_style`](Workspace::convert_link_style), covering `[[…]]` and
 /// markdown/djot `[t](a)` links alike. Id-form, external, and alias targets are
 /// left alone. Returns `text` unchanged when nothing restyled.
-fn restyle_body_links(text: &str, body: &str, file: &Path, style: crate::link::LinkStyle) -> String {
+fn restyle_body_links(
+    text: &str,
+    body: &str,
+    file: &Path,
+    style: crate::link::LinkStyle,
+) -> String {
     if body.is_empty() {
         return text.to_string();
     }
@@ -1220,7 +1540,10 @@ fn restyle_body_links(text: &str, body: &str, file: &Path, style: crate::link::L
             continue;
         }
         let resolved = link::resolve(file, &bl.link.target);
-        let retargeted = bl.link.with_target(link::path_text(style, file, &resolved)).render();
+        let retargeted = bl
+            .link
+            .with_target(link::path_text(style, file, &resolved))
+            .render();
         new_body.push_str(&body[cursor..bl.span.start]);
         new_body.push_str(&retargeted);
         cursor = bl.span.end;
@@ -1259,7 +1582,10 @@ fn rerelativize_body_links(text: &str, body: &str, from: &Path, to: &Path) -> St
             continue;
         }
         let resolved = link::resolve(from, &bl.link.target);
-        let retargeted = bl.link.with_target(link::relative(new_dir, &resolved)).render();
+        let retargeted = bl
+            .link
+            .with_target(link::relative(new_dir, &resolved))
+            .render();
         new_body.push_str(&body[cursor..bl.span.start]);
         new_body.push_str(&retargeted);
         cursor = bl.span.end;
@@ -1339,7 +1665,8 @@ mod tests {
     }
 
     fn tempdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("colophon-mutate-{tag}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("colophon-mutate-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -1363,8 +1690,16 @@ mod tests {
         // Frontmatter-only storage: each document carries its own `id`; a flat
         // scan reconstructs the id→path map with no registry document.
         let dir = tempdir("scan-ids");
-        write(&dir, "index.md", "---\ntitle: Root\nid: aaaaaaa\n---\nbody\n");
-        write(&dir, "sub/child.md", "---\ntitle: Child\nid: bbbbbbb\n---\nbody\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\nid: aaaaaaa\n---\nbody\n",
+        );
+        write(
+            &dir,
+            "sub/child.md",
+            "---\ntitle: Child\nid: bbbbbbb\n---\nbody\n",
+        );
         // A document with no `id` is simply absent from the map, not an error.
         write(&dir, "sub/plain.md", "---\ntitle: Plain\n---\nbody\n");
 
@@ -1373,8 +1708,14 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                (crate::identity::Id("aaaaaaa".into()), PathBuf::from("index.md")),
-                (crate::identity::Id("bbbbbbb".into()), PathBuf::from("sub/child.md")),
+                (
+                    crate::identity::Id("aaaaaaa".into()),
+                    PathBuf::from("index.md")
+                ),
+                (
+                    crate::identity::Id("bbbbbbb".into()),
+                    PathBuf::from("sub/child.md")
+                ),
             ]
         );
     }
@@ -1387,11 +1728,19 @@ mod tests {
         let dir = tempdir("create");
         write(&dir, "index.md", "```fig\ntitle = Root\n```\nbody\n");
         // Plain-relative keeps the authored links bare and deterministic.
-        let w = || Workspace::builder(StdFs).root(&dir).link_style(LinkStyle::PlainRelative).build();
+        let w = || {
+            Workspace::builder(StdFs)
+                .root(&dir)
+                .link_style(LinkStyle::PlainRelative)
+                .build()
+        };
         block_on(w().create(Path::new("notes/new.md"), Path::new("index.md"))).unwrap();
 
         let child = read(&dir, "notes/new.md");
-        assert!(child.starts_with("```fig\n"), "child inherits the parent's archetype: {child}");
+        assert!(
+            child.starts_with("```fig\n"),
+            "child inherits the parent's archetype: {child}"
+        );
         assert!(child.contains("part_of = ../index.md"), "{child}");
         let parent = read(&dir, "index.md");
         // fig ≥ 2.2 renders spliced containers as flow — the round-trippable
@@ -1415,7 +1764,11 @@ mod tests {
             .default_embed_format(fig::Format::Fig)
             .build();
         block_on(w.create(Path::new("a.md"), Path::new("index.yaml"))).unwrap();
-        assert!(read(&dir, "a.md").starts_with("```fig"), "{}", read(&dir, "a.md"));
+        assert!(
+            read(&dir, "a.md").starts_with("```fig"),
+            "{}",
+            read(&dir, "a.md")
+        );
     }
 
     #[test]
@@ -1432,8 +1785,14 @@ mod tests {
             .build();
         block_on(w.create(Path::new("a.md"), Path::new("index.md"))).unwrap();
 
-        let parent_id = w.index().id_for_path(Path::new("index.md")).expect("parent registered");
-        let child_id = w.index().id_for_path(Path::new("a.md")).expect("child registered");
+        let parent_id = w
+            .index()
+            .id_for_path(Path::new("index.md"))
+            .expect("parent registered");
+        let child_id = w
+            .index()
+            .id_for_path(Path::new("a.md"))
+            .expect("child registered");
         assert!(read(&dir, "a.md").contains(&format!("part_of: id:{parent_id}")));
         assert!(read(&dir, "index.md").contains(&format!("id:{child_id}")));
         // And it still validates — id targets resolve through the registry.
@@ -1477,14 +1836,28 @@ mod tests {
 
         // Up: `part_of` on the child is a durable id link, and it registered the
         // parent (the id direction is what triggers registration).
-        let parent_id = w.index().id_for_path(Path::new("index.md")).expect("parent registered");
-        assert!(read(&dir, "a.md").contains(&format!("part_of: id:{parent_id}")), "{}", read(&dir, "a.md"));
+        let parent_id = w
+            .index()
+            .id_for_path(Path::new("index.md"))
+            .expect("parent registered");
+        assert!(
+            read(&dir, "a.md").contains(&format!("part_of: id:{parent_id}")),
+            "{}",
+            read(&dir, "a.md")
+        );
 
         // Down: `contents` on the parent is a nominal alias wikilink (the child's
         // title), and — because `alias` never links-by-id — the child is *not*
         // registered. That asymmetry is by design.
-        assert!(read(&dir, "index.md").contains("[[a]]"), "{}", read(&dir, "index.md"));
-        assert!(w.index().id_for_path(Path::new("a.md")).is_none(), "alias down-link must not register the child");
+        assert!(
+            read(&dir, "index.md").contains("[[a]]"),
+            "{}",
+            read(&dir, "index.md")
+        );
+        assert!(
+            w.index().id_for_path(Path::new("a.md")).is_none(),
+            "alias down-link must not register the child"
+        );
     }
 
     #[test]
@@ -1502,13 +1875,19 @@ mod tests {
         // pointer at its (empty) prose body.
         let node = read(&dir, "notes.yaml");
         assert!(node.contains("title: notes"), "{node}");
-        assert!(node.contains("index.yaml"), "inverse link to parent node: {node}");
+        assert!(
+            node.contains("index.yaml"),
+            "inverse link to parent node: {node}"
+        );
         assert!(node.contains("content: notes.md"), "{node}");
         assert_eq!(read(&dir, "notes.md"), "", "the body file starts empty");
         // The parent's spanning entry points at the node, never the body file.
         let index = read(&dir, "index.yaml");
         assert!(index.contains("notes.yaml"), "{index}");
-        assert!(!index.contains("notes.md"), "parent links the node, not the body: {index}");
+        assert!(
+            !index.contains("notes.md"),
+            "parent links the node, not the body: {index}"
+        );
         // The whole (separated) workspace still validates.
         assert_eq!(block_on(ws(&dir).check("index.yaml")).unwrap(), vec![]);
     }
@@ -1519,7 +1898,11 @@ mod tests {
         // root in both directions and leaves its prose untouched.
         let dir = tempdir("adopt");
         write(&dir, "index.md", "---\ntitle: Home\n---\n");
-        write(&dir, "notes/loose.md", "---\ntitle: Loose\n---\nOriginal body, kept.\n");
+        write(
+            &dir,
+            "notes/loose.md",
+            "---\ntitle: Loose\n---\nOriginal body, kept.\n",
+        );
         // The default markdown-root style authors `/index.md`, which resolves from
         // a subdirectory child (a bare canonical path would not).
         let mut w = Workspace::builder(StdFs).root(&dir).build();
@@ -1527,13 +1910,112 @@ mod tests {
         block_on(w.adopt(Path::new("notes/loose.md"), Path::new("index.md"))).unwrap();
 
         // Down: the root's spanning field gained the child.
-        assert!(read(&dir, "index.md").contains("notes/loose.md"), "{}", read(&dir, "index.md"));
+        assert!(
+            read(&dir, "index.md").contains("notes/loose.md"),
+            "{}",
+            read(&dir, "index.md")
+        );
         // Up: the child declares part_of back to the root (workspace-absolute), and
         // keeps its body.
         let child = read(&dir, "notes/loose.md");
         assert!(child.contains("/index.md"), "{child}");
-        assert!(child.contains("Original body, kept."), "body must be preserved: {child}");
+        assert!(
+            child.contains("Original body, kept."),
+            "body must be preserved: {child}"
+        );
         // The whole workspace validates — no orphan, no missing inverse.
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn reparent_moves_a_node_in_the_tree_and_leaves_the_file_alone() {
+        // The complement of `rename`: the document's *path* is untouched, only its
+        // place in the tree changes. The old parent forgets it, the new one gains
+        // it, and its inverse points somewhere new — three documents, one verb.
+        let dir = tempdir("reparent");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Home\ncontents:\n- '[Jul](/jul.md)'\n- '[Aug](/aug.md)'\n---\n",
+        );
+        write(
+            &dir,
+            "jul.md",
+            "---\ntitle: Jul\npart_of: '[Home](/index.md)'\ncontents:\n- '[Day](/day.md)'\n---\n",
+        );
+        write(
+            &dir,
+            "aug.md",
+            "---\ntitle: Aug\npart_of: '[Home](/index.md)'\ncontents:\n---\n",
+        );
+        write(
+            &dir,
+            "day.md",
+            "---\ntitle: Day\npart_of: '[Jul](/jul.md)'\n---\nProse survives.\n",
+        );
+
+        block_on(ws(&dir).reparent(Path::new("day.md"), Path::new("aug.md"))).unwrap();
+
+        assert!(
+            !read(&dir, "jul.md").contains("day.md"),
+            "old parent forgot it: {}",
+            read(&dir, "jul.md")
+        );
+        assert!(
+            read(&dir, "aug.md").contains("day.md"),
+            "new parent gained it: {}",
+            read(&dir, "aug.md")
+        );
+        let day = read(&dir, "day.md");
+        assert!(day.contains("/aug.md"), "inverse repointed: {day}");
+        assert!(!day.contains("/jul.md"), "old inverse gone: {day}");
+        assert!(day.contains("Prose survives."), "body untouched: {day}");
+        // The file never moved — that is `mv`'s job, not this one's.
+        assert!(dir.join("day.md").exists(), "the path is preserved");
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn reparent_is_idempotent_and_adopts_an_unparented_child() {
+        // Re-running is a no-op (a script should not have to ask first), and a
+        // child with no parent at all is accepted: there is simply nothing to
+        // remove, so the effect is exactly `adopt`'s.
+        let dir = tempdir("reparent-idem");
+        write(&dir, "index.md", "---\ntitle: Home\n---\n");
+        write(&dir, "loose.md", "---\ntitle: Loose\n---\n");
+
+        block_on(ws(&dir).reparent(Path::new("loose.md"), Path::new("index.md"))).unwrap();
+        let once = read(&dir, "index.md");
+        block_on(ws(&dir).reparent(Path::new("loose.md"), Path::new("index.md"))).unwrap();
+        assert_eq!(read(&dir, "index.md"), once, "second run changes nothing");
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn reparent_refuses_to_detach_a_subtree_under_its_own_descendant() {
+        // Reparenting a node beneath something it contains would sever both from
+        // the tree: they would still claim each other, so nothing looks broken
+        // from inside the loop — a spanning walk would just never reach them
+        // again. Refusing is the only way that stays visible.
+        let dir = tempdir("reparent-cycle");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Home\ncontents:\n- '[A](/a.md)'\n---\n",
+        );
+        write(
+            &dir,
+            "a.md",
+            "---\ntitle: A\npart_of: '[Home](/index.md)'\ncontents:\n- '[B](/b.md)'\n---\n",
+        );
+        write(&dir, "b.md", "---\ntitle: B\npart_of: '[A](/a.md)'\n---\n");
+
+        let err = block_on(ws(&dir).reparent(Path::new("a.md"), Path::new("b.md"))).unwrap_err();
+        assert!(
+            err.to_string().contains("detach both from the tree"),
+            "{err}"
+        );
+        // Refused means untouched, not half-done.
         assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
     }
 
@@ -1543,12 +2025,19 @@ mod tests {
         write(&dir, "index.md", "---\ntitle: Home\n---\n");
         write(&dir, "other.md", "---\ntitle: Other\n---\n");
         write(&dir, "a.md", "---\ntitle: A\n---\n");
-        let mut w = Workspace::builder(StdFs).root(&dir).link_style(LinkStyle::PlainCanonical).build();
+        let mut w = Workspace::builder(StdFs)
+            .root(&dir)
+            .link_style(LinkStyle::PlainCanonical)
+            .build();
 
         // First adoption links it; a second is a clean no-op (no duplicate entry).
         block_on(w.adopt(Path::new("a.md"), Path::new("index.md"))).unwrap();
         block_on(w.adopt(Path::new("a.md"), Path::new("index.md"))).unwrap();
-        assert_eq!(read(&dir, "index.md").matches("a.md").count(), 1, "no duplicate spanning entry");
+        assert_eq!(
+            read(&dir, "index.md").matches("a.md").count(),
+            1,
+            "no duplicate spanning entry"
+        );
 
         // a.md now claims index.md; adopting it under a different parent is refused.
         let contested = block_on(w.adopt(Path::new("a.md"), Path::new("other.md")));
@@ -1594,7 +2083,11 @@ mod tests {
         // wikilinks are maintained by rewriting the path form, while a
         // `[[colophon:id]]` reference is left exactly as written.
         let dir = tempdir("wikilink-rerel");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- mid.md\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- mid.md\n---\n",
+        );
         write(
             &dir,
             "mid.md",
@@ -1613,7 +2106,10 @@ mod tests {
         assert!(mid.contains("part_of: ../index.md"), "{mid}");
         assert!(mid.ends_with(".\n"), "body preserved: {mid}");
         // Parent's spanning entry followed the move too.
-        assert!(read(&dir, "index.md").contains("sub/mid.md"), "parent retargeted");
+        assert!(
+            read(&dir, "index.md").contains("sub/mid.md"),
+            "parent retargeted"
+        );
     }
 
     #[test]
@@ -1622,7 +2118,11 @@ mod tests {
         // maintained on a move, just like wikilinks — while an external URL and a
         // link that is actually code (inside a fence) are left untouched.
         let dir = tempdir("md-body-rerel");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- mid.md\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- mid.md\n---\n",
+        );
         write(
             &dir,
             "mid.md",
@@ -1640,8 +2140,14 @@ mod tests {
         // The external URL is untouched.
         assert!(mid.contains("[home](https://ex.com)"), "{mid}");
         // The look-alike link inside the code fence must NOT be rewritten.
-        assert!(mid.contains("[fake](leaf.md)"), "code fence left alone: {mid}");
-        assert!(read(&dir, "index.md").contains("sub/mid.md"), "parent retargeted");
+        assert!(
+            mid.contains("[fake](leaf.md)"),
+            "code fence left alone: {mid}"
+        );
+        assert!(
+            read(&dir, "index.md").contains("sub/mid.md"),
+            "parent retargeted"
+        );
     }
 
     #[test]
@@ -1650,8 +2156,16 @@ mod tests {
         // the diagnosis half of body-link ownership. A wikilink to nowhere was
         // already caught; parity for markdown/djot links.
         let dir = tempdir("md-body-check");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
-        write(&dir, "a.md", "---\npart_of: index.md\n---\nSee [gone](nope.md).\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
+        write(
+            &dir,
+            "a.md",
+            "---\npart_of: index.md\n---\nSee [gone](nope.md).\n",
+        );
 
         let findings = block_on(ws(&dir).check("index.md")).unwrap();
         assert!(
@@ -1669,11 +2183,19 @@ mod tests {
         let dir = tempdir("md-body-inbound");
         write(&dir, "index.md", "---\ncontents:\n- a.md\n- b.md\n---\n");
         write(&dir, "a.md", "---\npart_of: index.md\n---\n");
-        write(&dir, "b.md", "---\npart_of: index.md\n---\nAlso see [it](a.md) nearby.\n");
+        write(
+            &dir,
+            "b.md",
+            "---\npart_of: index.md\n---\nAlso see [it](a.md) nearby.\n",
+        );
 
         block_on(ws(&dir).rename(Path::new("a.md"), Path::new("sub/a.md"))).unwrap();
 
-        assert!(read(&dir, "b.md").contains("[it](sub/a.md)"), "inbound md link retargeted: {}", read(&dir, "b.md"));
+        assert!(
+            read(&dir, "b.md").contains("[it](sub/a.md)"),
+            "inbound md link retargeted: {}",
+            read(&dir, "b.md")
+        );
         assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
     }
 
@@ -1682,12 +2204,23 @@ mod tests {
         // Outbound links resolve from the document's *directory*; a same-dir
         // rename does not move them, so the body must not churn.
         let dir = tempdir("wikilink-samedir");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
-        write(&dir, "a.md", "---\npart_of: index.md\n---\nlink to [[leaf.md]].\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
+        write(
+            &dir,
+            "a.md",
+            "---\npart_of: index.md\n---\nlink to [[leaf.md]].\n",
+        );
         write(&dir, "leaf.md", "---\ntitle: Leaf\n---\n");
 
         block_on(ws(&dir).rename(Path::new("a.md"), Path::new("b.md"))).unwrap();
-        assert!(read(&dir, "b.md").contains("[[leaf.md]]"), "unchanged in-place");
+        assert!(
+            read(&dir, "b.md").contains("[[leaf.md]]"),
+            "unchanged in-place"
+        );
     }
 
     #[test]
@@ -1708,7 +2241,10 @@ mod tests {
         block_on(ws(&dir).rename(Path::new("a.md"), Path::new("sub/a.md"))).unwrap();
 
         // Parent's spanning entry followed the move (as the old code did too).
-        assert!(read(&dir, "index.md").contains("sub/a.md"), "parent retargeted");
+        assert!(
+            read(&dir, "index.md").contains("sub/a.md"),
+            "parent retargeted"
+        );
         let b = read(&dir, "b.md");
         // Overlay `links` inbound from a sibling — newly maintained.
         assert!(b.contains("- sub/a.md"), "overlay links retargeted: {b}");
@@ -1724,7 +2260,11 @@ mod tests {
     fn delete_refuses_children_then_forces() {
         let dir = tempdir("delete");
         write(&dir, "index.md", "---\ncontents:\n- a.md\n- b.md\n---\n");
-        write(&dir, "a.md", "---\npart_of: index.md\ncontents:\n- b.md\n---\n");
+        write(
+            &dir,
+            "a.md",
+            "---\npart_of: index.md\ncontents:\n- b.md\n---\n",
+        );
         write(&dir, "b.md", "---\npart_of: index.md\n---\n");
 
         let err = block_on(ws(&dir).delete(Path::new("a.md"), false)).unwrap_err();
@@ -1767,7 +2307,10 @@ mod tests {
             "{danglers:?}"
         );
         // The parent's spanning entry was removed, not reported.
-        assert!(!read(&dir, "index.md").contains("a.md"), "parent entry cleaned");
+        assert!(
+            !read(&dir, "index.md").contains("a.md"),
+            "parent entry cleaned"
+        );
     }
 
     #[test]
@@ -1781,20 +2324,36 @@ mod tests {
         assert_eq!(stem, "my-great-note");
         let path = PathBuf::from(format!("{stem}.md"));
 
-        block_on(ws(&dir).create_with_title(&path, Path::new("index.md"), "My Great Note")).unwrap();
+        block_on(ws(&dir).create_with_title(&path, Path::new("index.md"), "My Great Note"))
+            .unwrap();
 
         let child = read(&dir, "my-great-note.md");
-        assert!(child.contains("title: My Great Note"), "original title kept: {child}");
+        assert!(
+            child.contains("title: My Great Note"),
+            "original title kept: {child}"
+        );
         // The parent's spanning-entry label reads as the title, not the stem.
-        assert!(read(&dir, "index.md").contains("My Great Note"), "{}", read(&dir, "index.md"));
+        assert!(
+            read(&dir, "index.md").contains("My Great Note"),
+            "{}",
+            read(&dir, "index.md")
+        );
         assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
     }
 
     #[test]
     fn duplicate_copies_under_the_same_parent_and_links_both_ways() {
         let dir = tempdir("duplicate");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
-        write(&dir, "a.md", "---\ntitle: A\npart_of: index.md\n---\nA body, copied.\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
+        write(
+            &dir,
+            "a.md",
+            "---\ntitle: A\npart_of: index.md\n---\nA body, copied.\n",
+        );
 
         let copy = block_on(ws(&dir).duplicate(Path::new("a.md"))).unwrap();
         assert_eq!(copy, PathBuf::from("a-copy.md"));
@@ -1818,15 +2377,26 @@ mod tests {
         // A container with a child, duplicated: the copy is childless (no double
         // parent), and a second duplicate takes the next free `-copy-N` name.
         let dir = tempdir("duplicate-suffix");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- mid.md\n---\n");
-        write(&dir, "mid.md", "---\ntitle: Mid\npart_of: index.md\ncontents:\n- leaf.md\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- mid.md\n---\n",
+        );
+        write(
+            &dir,
+            "mid.md",
+            "---\ntitle: Mid\npart_of: index.md\ncontents:\n- leaf.md\n---\n",
+        );
         write(&dir, "leaf.md", "---\ntitle: Leaf\npart_of: mid.md\n---\n");
 
         let first = block_on(ws(&dir).duplicate(Path::new("mid.md"))).unwrap();
         assert_eq!(first, PathBuf::from("mid-copy.md"));
         // The copy did not clone the child — no contested containment for leaf.md.
         let copy = read(&dir, "mid-copy.md");
-        assert!(!copy.contains("leaf.md"), "children must not be cloned: {copy}");
+        assert!(
+            !copy.contains("leaf.md"),
+            "children must not be cloned: {copy}"
+        );
         assert!(copy.contains("part_of: index.md"), "{copy}");
 
         // A second duplicate of the same source bumps past the taken name.
@@ -1841,13 +2411,27 @@ mod tests {
         // exactly one document. The copy is a distinct path with (here, lazy) no
         // id of its own until something links it.
         let dir = tempdir("duplicate-id");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
-        write(&dir, "a.md", "---\ntitle: A\npart_of: index.md\nid: aaaaaaa\n---\nbody\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
+        write(
+            &dir,
+            "a.md",
+            "---\ntitle: A\npart_of: index.md\nid: aaaaaaa\n---\nbody\n",
+        );
 
         let copy = block_on(id_ws(&dir).duplicate(Path::new("a.md"))).unwrap();
         let copied = read(&dir, &copy.to_string_lossy());
-        assert!(!copied.contains("aaaaaaa"), "the source's id must not be cloned: {copied}");
-        assert!(!copied.contains("\nid:"), "the copy carries no stamped id: {copied}");
+        assert!(
+            !copied.contains("aaaaaaa"),
+            "the source's id must not be cloned: {copied}"
+        );
+        assert!(
+            !copied.contains("\nid:"),
+            "the copy carries no stamped id: {copied}"
+        );
     }
 
     #[test]
@@ -1856,7 +2440,11 @@ mod tests {
         // copy is its own pair, pointing at its own body, not the source's.
         let dir = tempdir("duplicate-separate");
         write(&dir, "index.yaml", "title: Root\ncontents:\n- notes.yaml\n");
-        write(&dir, "notes.yaml", "title: Notes\npart_of: index.yaml\ncontent: notes.md\n");
+        write(
+            &dir,
+            "notes.yaml",
+            "title: Notes\npart_of: index.yaml\ncontent: notes.md\n",
+        );
         write(&dir, "notes.md", "Prose body, duplicated.\n");
 
         let copy = block_on(ws(&dir).duplicate(Path::new("notes.yaml"))).unwrap();
@@ -1864,7 +2452,10 @@ mod tests {
 
         // The copy node points at its own body; the body file is a real copy.
         let node = read(&dir, "notes-copy.yaml");
-        assert!(node.contains("content: notes-copy.md"), "repointed content: {node}");
+        assert!(
+            node.contains("content: notes-copy.md"),
+            "repointed content: {node}"
+        );
         assert_eq!(read(&dir, "notes-copy.md"), "Prose body, duplicated.\n");
         // Source body untouched, and the workspace validates.
         assert_eq!(read(&dir, "notes.md"), "Prose body, duplicated.\n");
@@ -1879,17 +2470,27 @@ mod tests {
         // mid.md is untouched (that's the root's to convert), so the workspace
         // sits in a valid mixed style.
         let dir = tempdir("convert-linkstyle");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- '[Mid](/sub/mid.md)'\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- '[Mid](/sub/mid.md)'\n---\n",
+        );
         write(
             &dir,
             "sub/mid.md",
             "---\ntitle: Mid\npart_of: /index.md\n---\nSee [the leaf](/sub/leaf.md).\n",
         );
-        write(&dir, "sub/leaf.md", "---\ntitle: Leaf\npart_of: /sub/mid.md\n---\n");
+        write(
+            &dir,
+            "sub/leaf.md",
+            "---\ntitle: Leaf\npart_of: /sub/mid.md\n---\n",
+        );
 
-        let n = block_on(
-            ws(&dir).convert_link_style(Path::new("sub/mid.md"), LinkStyle::PlainRelative, false),
-        )
+        let n = block_on(ws(&dir).convert_link_style(
+            Path::new("sub/mid.md"),
+            LinkStyle::PlainRelative,
+            false,
+        ))
         .unwrap();
         assert_eq!(n, 1, "only the one file converted");
 
@@ -1899,7 +2500,10 @@ mod tests {
         assert!(mid.contains("[the leaf](leaf.md)"), "{mid}");
         // The root's inbound link stays in its original root style — not this
         // file's to convert.
-        assert!(read(&dir, "index.md").contains("[Mid](/sub/mid.md)"), "inbound untouched");
+        assert!(
+            read(&dir, "index.md").contains("[Mid](/sub/mid.md)"),
+            "inbound untouched"
+        );
         // And the mixed-style workspace still validates.
         assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
     }
@@ -1910,7 +2514,11 @@ mod tests {
         // external URL are left exactly as written — link_format spells only
         // *path* targets.
         let dir = tempdir("convert-recursive");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
         write(
             &dir,
             "a.md",
@@ -1919,9 +2527,11 @@ mod tests {
         );
         write(&dir, "sub/b.md", "---\ntitle: B\npart_of: ../a.md\n---\n");
 
-        let n = block_on(
-            ws(&dir).convert_link_style(Path::new("index.md"), LinkStyle::MarkdownRoot, true),
-        )
+        let n = block_on(ws(&dir).convert_link_style(
+            Path::new("index.md"),
+            LinkStyle::MarkdownRoot,
+            true,
+        ))
         .unwrap();
         assert_eq!(n, 3, "root + a + b all converted");
 
@@ -1932,7 +2542,10 @@ mod tests {
         // External and id targets untouched.
         assert!(a.contains("[ext](https://example.com)"), "{a}");
         assert!(a.contains("[[id:ajp7eqb|pinned]]"), "{a}");
-        assert!(read(&dir, "sub/b.md").contains("part_of: /a.md"), "descendant converted");
+        assert!(
+            read(&dir, "sub/b.md").contains("part_of: /a.md"),
+            "descendant converted"
+        );
         // (No `check` here: `ajp7eqb` is a deliberately fake id, which `check`
         // would flag as malformed regardless of the conversion. The first
         // convert test validates a clean workspace after converting.)
@@ -1943,7 +2556,11 @@ mod tests {
         // Workspace policy lives in a config document the root links via the
         // `config` relation — the registry's reachability move, for config.
         let dir = tempdir("config");
-        write(&dir, "index.md", "---\ntitle: Root\nconfig: colophon.yaml\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\nconfig: colophon.yaml\n---\n",
+        );
         write(
             &dir,
             "colophon.yaml",
@@ -1955,12 +2572,23 @@ mod tests {
             Some(PathBuf::from("colophon.yaml"))
         );
         let value = block_on(ws.config_get(Path::new("index.md"), "link_format")).unwrap();
-        assert_eq!(value.and_then(|v| v.as_str().map(str::to_owned)), Some("plain_relative".into()));
+        assert_eq!(
+            value.and_then(|v| v.as_str().map(str::to_owned)),
+            Some("plain_relative".into())
+        );
         // An unset key falls through to None (caller uses its default).
-        assert!(block_on(ws.config_get(Path::new("index.md"), "missing")).unwrap().is_none());
+        assert!(
+            block_on(ws.config_get(Path::new("index.md"), "missing"))
+                .unwrap()
+                .is_none()
+        );
         // No pointer at all → no config document.
         write(&dir, "bare.md", "---\ntitle: Bare\n---\n");
-        assert!(block_on(ws.config_path(Path::new("bare.md"))).unwrap().is_none());
+        assert!(
+            block_on(ws.config_path(Path::new("bare.md")))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1977,7 +2605,11 @@ mod tests {
     #[test]
     fn id_links_survive_a_rename_without_any_text_edit() {
         let dir = tempdir("id-rename");
-        write(&dir, "index.md", "---\ntitle: Root\ncontents:\n- a.md\n---\n");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- a.md\n---\n",
+        );
         write(&dir, "a.md", "---\npart_of: index.md\n---\n");
 
         let mut w = id_ws(&dir);
@@ -2023,9 +2655,13 @@ mod tests {
         let id = block_on(w.register(Path::new("a.md"), Trigger::Link)).unwrap();
         let text = read(&dir, "index.md");
         let carrier = Document::parse("index.md", &text).unwrap().carrier;
-        let updated =
-            crate::edit::set_in_text(&text, carrier, "contents.0", fig::Value::Str(link::id_target(&id)))
-                .unwrap();
+        let updated = crate::edit::set_in_text(
+            &text,
+            carrier,
+            "contents.0",
+            fig::Value::Str(link::id_target(&id)),
+        )
+        .unwrap();
         std::fs::write(dir.join("index.md"), &updated).unwrap();
 
         block_on(w.delete(Path::new("a.md"), false)).unwrap();
@@ -2034,9 +2670,13 @@ mod tests {
         // to simulate the out-of-band case.
         let text = read(&dir, "index.md");
         let carrier = Document::parse("index.md", &text).unwrap().carrier;
-        let updated =
-            crate::edit::set_in_text(&text, carrier, "contents", fig::Value::Str(link::id_target(&id)))
-                .unwrap();
+        let updated = crate::edit::set_in_text(
+            &text,
+            carrier,
+            "contents",
+            fig::Value::Str(link::id_target(&id)),
+        )
+        .unwrap();
         std::fs::write(dir.join("index.md"), &updated).unwrap();
 
         assert!(w.index().resolve(&id).is_none(), "tombstoned");
@@ -2045,7 +2685,10 @@ mod tests {
         assert!(
             findings.iter().any(|f| matches!(
                 f,
-                crate::validate::Finding::DanglingId { tombstoned: true, .. }
+                crate::validate::Finding::DanglingId {
+                    tombstoned: true,
+                    ..
+                }
             )),
             "{findings:?}"
         );
@@ -2078,7 +2721,10 @@ mod tests {
             .index(FileIndex::new(fig::Format::Yaml))
             .build();
         block_on(w.create(Path::new("a.md"), Path::new("index.md"))).unwrap();
-        let id = w.index().id_for_path(Path::new("a.md")).expect("registered at birth");
+        let id = w
+            .index()
+            .id_for_path(Path::new("a.md"))
+            .expect("registered at birth");
         assert!(crate::identity::verify(id.as_str()));
     }
 
