@@ -58,6 +58,7 @@ pub mod fs;
 pub mod identity;
 pub mod index;
 pub mod intake;
+pub mod journal;
 pub mod link;
 pub mod meta;
 pub mod mutate;
@@ -76,10 +77,11 @@ pub use document::{Document, EmbedStyle, EmbedType, embed_carrier, is_opaque_pay
 pub use error::{Error, Result};
 pub use exec::block_on;
 pub use fig::Format;
-pub use fs::{Storage, StdFs};
+pub use fs::{Capabilities, Storage, StdFs};
 pub use identity::{Id, IdentityPolicy, Minter, Registration, Trigger};
 pub use index::{FileIndex, InMemoryIndex, IndexStore, NoIndex};
 pub use intake::{Adoption, PlanOutcome, StructurePlan, SynthNode};
+pub use journal::{Recovered, recover};
 pub use link::{
     Addressing, BodyLink, Link, LinkStyle, ReferenceStyle, Wikilink, Wrapper, format_link,
     path_to_title,

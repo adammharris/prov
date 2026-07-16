@@ -3055,6 +3055,16 @@ fn edit_file(path: &Path) -> std::io::Result<()> {
 
 fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {
     let mut ctx = find_root()?;
+    // Heal first, validate second: if a mutation was interrupted by a crash, a
+    // write-ahead journal is on disk. Roll it forward before reading the
+    // workspace, so `check` reports on a consistent tree — and so the recovery
+    // that `Error::Torn` points here to perform actually happens.
+    match block_on(colophon::recover(&StdFs, &ctx.root_dir))? {
+        colophon::Recovered::Applied(n) => {
+            println!("recovered an interrupted change: rolled {n} op(s) forward from the journal");
+        }
+        colophon::Recovered::Nothing => {}
+    }
     let root = match root {
         Some(r) => ws_rel(&ctx, r)?,
         None => ctx.root_doc.clone(),

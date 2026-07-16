@@ -17,14 +17,24 @@
 //!
 //! ## What this does and does not buy
 //!
-//! This is **error** atomicity, not **crash** atomicity. A failed write, a full
-//! disk, a permission error, a rejected edit — none of these can leave a
-//! half-linked workspace. A `kill -9` or a power cut still can: unwinding is
-//! driven from memory, and memory dies with the process. Closing *that* window
-//! needs a journal on disk and an `fsync` seam on [`Storage`] to order it
-//! against, which is a separate piece of work. The distinction is worth keeping
-//! sharp, because the cheap half covers almost every failure a user actually
-//! meets and needs neither.
+//! This is **error** atomicity, and — per *file* — **crash** atomicity too; what
+//! it is not yet is crash atomicity across the whole *set*. A failed write, a
+//! full disk, a permission error, a rejected edit — none of these can leave a
+//! half-linked workspace, because unwinding puts back every op already applied.
+//! And no single document can be caught half-written even by a power cut: every
+//! [`FileOp::Write`] lands through [`Storage::write_atomic`], which stages the
+//! new bytes in a temporary sibling, flushes them, and renames it over the
+//! target, so an observer sees the whole old document or the whole new one, never
+//! a splice. What a `kill -9` or a power cut *between* ops can still do is leave
+//! some of the set's files on their new contents and some on their old — each one
+//! individually intact, but the set torn at a document boundary. The in-memory
+//! unwind cannot repair that, because memory dies with the process. Closing that
+//! last window needs a write-ahead journal on disk, replayed on recovery; the
+//! [`Storage::write_atomic`]/[`Storage::sync`] seam it will order itself against
+//! now exists, but the journal itself is a separate piece of work. The
+//! distinction is worth keeping sharp: the half in place already covers every
+//! failure short of a crash mid-set, and a crash mid-set can only land on a
+//! document boundary that [`crate::validate`] can name.
 //!
 //! Two smaller honesties, both deliberate:
 //!
@@ -188,31 +198,71 @@ impl ChangeSet {
         self
     }
 
-    /// Execute every staged op against `fs`, rooted at `root`, as one unit.
+    /// Execute every staged op against `fs`, rooted at `root`, as one unit —
+    /// crash-atomically, behind a write-ahead journal.
     ///
-    /// On the first failure every op already applied is unwound in reverse and
-    /// the original error is returned — the workspace is left as it was found.
-    /// Should the *rollback* also fail (a disk that has gone away mid-unwind),
-    /// [`Error::Torn`] reports both, because that is the one case where colophon
-    /// genuinely cannot promise what is on disk.
+    /// The set's intent is journaled and flushed *before* any document is
+    /// touched (see [`crate::journal`]); that flush is the commit point. From
+    /// there the ops run in order, each recording how to undo itself:
+    ///
+    /// - **On success**, the journal is removed and the change is done.
+    /// - **On an error** (a full disk, a permission fault), every op already
+    ///   applied is unwound in reverse, the workspace is restored to what it was,
+    ///   and the journal is cleared — the mutation aborts as if it never began.
+    /// - **On a crash** (a `kill -9`, a power cut) there is no error to catch and
+    ///   no chance to unwind, so the journal simply survives; the next
+    ///   [`crate::journal::recover`] rolls the set forward to its fully-applied
+    ///   state. An interrupted change set is therefore always resolved to a
+    ///   consistent workspace — fully before it on a caught error, fully after it
+    ///   on a crash.
+    ///
+    /// The rare exception is a rollback that *itself* fails ([`Error::Torn`]):
+    /// colophon could not restore the pre-change state, so — rather than leave an
+    /// unknown one — it keeps the journal, and recovery will later roll the set
+    /// forward to the consistent applied state. Either way the workspace lands on
+    /// a state colophon can name.
     ///
     /// Takes `fs`/`root` rather than a [`crate::workspace::Workspace`] so a
     /// caller with neither — a bootstrap that must write two files before a
     /// workspace exists to write them through — can still land them together.
     pub async fn apply<FS: Storage>(&self, fs: &FS, root: &Path) -> Result<()> {
+        if self.ops.is_empty() {
+            return Ok(());
+        }
+        // The commit point: durably record the whole intent before touching a
+        // single document. `write_atomic` flushes it, so a crash finds the
+        // journal whole or not at all — never half-written.
+        let journal = root.join(crate::journal::JOURNAL_NAME);
+        fs.write_atomic(&journal, &crate::journal::encode(&self.ops)?).await?;
+
         let mut undo: Vec<Undo> = Vec::new();
         for op in &self.ops {
             let Err(cause) = exec(fs, root, op, &mut undo).await else {
                 continue;
             };
             return Err(match unwind(fs, undo).await {
-                Ok(()) => cause,
+                // Reverted cleanly: the change aborted, so the journal must go —
+                // otherwise recovery would later roll this very set *forward*,
+                // undoing the abort. If even the delete fails, fall through to
+                // `Torn` and let recovery complete the set instead.
+                Ok(()) => match fs.remove_file(&journal).await {
+                    Ok(()) => cause,
+                    Err(cleanup) => Error::Torn {
+                        cause: cause.to_string(),
+                        rollback: cleanup.to_string(),
+                    },
+                },
+                // Could not revert: keep the journal so recovery rolls the set
+                // forward to the consistent applied state.
                 Err(rollback) => Error::Torn {
                     cause: cause.to_string(),
                     rollback: rollback.to_string(),
                 },
             });
         }
+        // Applied cleanly. Drop the journal; if this delete fails, a later
+        // recovery re-applies the set idempotently and clears it — harmless.
+        fs.remove_file(&journal).await?;
         Ok(())
     }
 }
@@ -259,7 +309,13 @@ async fn exec<FS: Storage>(
                 Err(e) => return Err(e.into()),
             }
             ensure_parent(fs, &full).await?;
-            fs.write(&full, bytes).await?;
+            // Land the document through the atomic-replace protocol, so even a
+            // crash mid-write cannot expose a half-written file: the write goes to
+            // a staging sibling and is renamed into place. On a backend without
+            // atomic rename this degrades to a plain durable write (see
+            // [`Storage::write_atomic`]) — the per-file guarantee follows the
+            // backend's declared capabilities.
+            fs.write_atomic(&full, bytes).await?;
         }
         FileOp::Rename { from, to } => {
             let (from_full, to_full) = (root.join(from), root.join(to));
@@ -320,7 +376,8 @@ async fn ensure_parent<FS: Storage>(fs: &FS, full: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::exec::block_on;
-    use crate::fs::{FailAtWrite, StdFs};
+    use crate::fs::{FailAtWrite, FsEvent, RecordingFs, StdFs};
+    use crate::journal::JOURNAL_NAME;
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colophon-change-{name}"));
@@ -437,6 +494,119 @@ mod tests {
         let err = block_on(cs.apply(&FailAtWrite::nth(0), &root)).unwrap_err();
         assert!(err.to_string().contains("disk full"), "{err}");
         assert_eq!(read(&root, "gone.md").as_deref(), Some("precious"));
+    }
+
+    #[test]
+    fn every_document_write_lands_atomically_and_leaves_no_temp_files() {
+        // The payoff of routing `FileOp::Write` through `write_atomic`: applying a
+        // set stages each document through a sibling and renames it into place, so
+        // no reader ever catches one half-written, and a clean apply leaves not one
+        // staging file behind.
+        let root = tmp("apply-atomic");
+        std::fs::write(root.join("parent.md"), "old parent").unwrap();
+        let fs = RecordingFs::local();
+        let mut cs = ChangeSet::new();
+        cs.write("child.md", "child");
+        cs.write("parent.md", "new parent");
+        block_on(cs.apply(&fs, &root)).unwrap();
+
+        assert_eq!(read(&root, "child.md").as_deref(), Some("child"));
+        assert_eq!(read(&root, "parent.md").as_deref(), Some("new parent"));
+
+        // Every write in the log is either a staging sibling or a rename target —
+        // never a plain write straight to a document path.
+        for event in fs.events() {
+            if let FsEvent::Write(p) = event {
+                let name = p.file_name().unwrap().to_string_lossy();
+                assert!(name.contains("colophon-tmp"), "wrote a document non-atomically: {name}");
+            }
+        }
+        // And nothing staging survives.
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("colophon-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging files survived apply: {leftovers:?}");
+    }
+
+    #[test]
+    fn apply_journals_before_touching_documents_and_clears_it_after() {
+        // The commit-point protocol: the journal is written and renamed into
+        // place *before* the first document write, and removed *after* the last —
+        // so a crash is always found with the journal either whole (roll forward)
+        // or absent (nothing began).
+        let root = tmp("journal-order");
+        std::fs::write(root.join("parent.md"), "old parent").unwrap();
+        let fs = RecordingFs::local();
+        let mut cs = ChangeSet::new();
+        cs.write("child.md", "child");
+        cs.write("parent.md", "new parent");
+        block_on(cs.apply(&fs, &root)).unwrap();
+
+        let events = fs.events();
+        let journal = root.join(JOURNAL_NAME);
+
+        // The journal is renamed into place before any document write happens.
+        let journal_committed = events
+            .iter()
+            .position(|e| matches!(e, FsEvent::Rename(_, to) if *to == journal))
+            .expect("journal must be committed");
+        let first_doc_write = events
+            .iter()
+            .position(|e| matches!(e, FsEvent::Write(p) if !crate::journal::is_journal_path(p)))
+            .expect("a document must be written");
+        assert!(
+            journal_committed < first_doc_write,
+            "the journal must be durable before any document is touched"
+        );
+
+        // And it is removed at the very end — nothing survives a clean apply.
+        assert_eq!(events.last(), Some(&FsEvent::Remove(journal.clone())));
+        assert!(!journal.exists());
+    }
+
+    #[test]
+    fn a_caught_error_reverts_and_leaves_no_journal_behind() {
+        // An error mid-apply unwinds to the pre-change state *and* clears the
+        // journal — so a later recovery cannot roll the aborted set forward.
+        let root = tmp("journal-abort");
+        std::fs::write(root.join("existing.md"), "before").unwrap();
+        let mut cs = ChangeSet::new();
+        cs.write("existing.md", "after");
+        cs.write("brand-new.md", "never lands");
+        let err = block_on(cs.apply(&FailAtWrite::nth(1), &root)).unwrap_err();
+
+        assert!(err.to_string().contains("disk full"), "{err}");
+        assert_eq!(read(&root, "existing.md").as_deref(), Some("before"));
+        assert_eq!(read(&root, "brand-new.md"), None);
+        assert!(
+            !root.join(JOURNAL_NAME).exists(),
+            "a cleanly-reverted change must not leave a journal to roll forward"
+        );
+    }
+
+    #[test]
+    fn a_crash_mid_apply_is_recovered_forward_from_the_journal() {
+        // The end-to-end crash story: apply writes the journal, a crash strikes
+        // before the set finishes (modeled by leaving the journal and only the
+        // first write on disk), and `recover` rolls the rest forward.
+        let root = tmp("journal-crash");
+        std::fs::write(root.join("parent.md"), "old parent").unwrap();
+        let mut cs = ChangeSet::new();
+        cs.write("child.md", "child");
+        cs.write("parent.md", "new parent");
+
+        // The journal the real apply would have committed at its commit point.
+        std::fs::write(root.join(JOURNAL_NAME), crate::journal::encode(cs.ops()).unwrap()).unwrap();
+        // A crash after the first document landed but before the second.
+        std::fs::write(root.join("child.md"), "child").unwrap();
+
+        let outcome = block_on(crate::journal::recover(&StdFs, &root)).unwrap();
+        assert_eq!(outcome, crate::journal::Recovered::Applied(2));
+        assert_eq!(read(&root, "child.md").as_deref(), Some("child"));
+        assert_eq!(read(&root, "parent.md").as_deref(), Some("new parent"));
+        assert!(!root.join(JOURNAL_NAME).exists());
     }
 
     #[test]
