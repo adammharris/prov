@@ -27,7 +27,7 @@ moid.workspace = true
 # build.rs runs `zig build`, same shape as `fig`), so building colophon needs
 # the Zig toolchain. A required dependency: body rendering and code-aware
 # link scanning are always available, not gated behind a feature.
-twig.workspace = true
+twig-doc.workspace = true
 
 [features]
 # YAML is the conventional default (`---` frontmatter, `registry.yaml`). Turn it

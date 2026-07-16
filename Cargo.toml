@@ -25,10 +25,8 @@ indexmap = { version = "2.0", features = ["serde"] }
 thiserror = "2.0"
 
 # Body-prose parsing (Djot/Markdown) — colophon's body-parser dependency (see
-# `src/content.rs`). Published on crates.io as `twig-doc`; imported under the
-# `twig` name via `package`. Pinned to 1.0.0. Zig-backed like `fig`, same build
-# shape (its build.rs runs `zig build`).
-twig = { package = "twig-doc", version = "1.0.0" }
+# `src/content.rs`).
+twig-doc = { version = "2.1.0" }
 
 # Opaque document-ID minting: betanumeric alphabet + NOID-style check character
 # over a seeded PRNG. Colophon supplies its own seed (uniqueness is enforced by
