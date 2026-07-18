@@ -887,8 +887,7 @@ pub(crate) fn cmd_init(
             // node that points at it via `content` and carries the same title/author/
             // config pointer a combined root would embed.
             MetaCarrier::WholeFile(format) => {
-                let node_name =
-                    format!("index.{}", prov::document::whole_file_extension(format));
+                let node_name = format!("index.{}", prov::document::whole_file_extension(format));
                 std::fs::write(dir.join(&content_name), content.heading(&title))?;
                 let mut node = Mapping::new();
                 node.insert("title".into(), Value::String(title.clone()));

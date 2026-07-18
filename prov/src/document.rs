@@ -366,10 +366,7 @@ mod tests {
     fn parses_fig_fenced_frontmatter() {
         let text = "```fig\ntitle = prov\ncontents = [docs/design.md]\n```\n# Body\n";
         let doc = Document::parse("README.md", text).unwrap();
-        assert_eq!(
-            doc.meta.get("title").and_then(Value::as_str),
-            Some("prov")
-        );
+        assert_eq!(doc.meta.get("title").and_then(Value::as_str), Some("prov"));
         assert_eq!(doc.body, "# Body\n");
         assert_eq!(
             doc.carrier,
