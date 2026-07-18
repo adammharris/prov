@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use fig::Segment;
 
-use crate::document::{Document, MetaCarrier, whole_file_format};
+use crate::document::{Document, EmbedStyle, MetaCarrier, whole_file_format};
 use crate::edit::MetaEditor;
 use crate::error::{Error, Result};
 use crate::fs::Storage;
@@ -47,6 +47,19 @@ use crate::link::{self, Link};
 use crate::meta::Value;
 use crate::validate::{Finding, LinkSite, Resolution};
 use crate::workspace::{Target, Workspace};
+
+/// Which axis a metadata reformat varies — the shared core of
+/// [`Workspace::convert_meta_format`] and [`Workspace::convert_meta_embed`]. Both
+/// re-emit a document's block in a new archetype resolved from the document's
+/// *other* axis: `Format` keeps the embedding shape and swaps the frontmatter
+/// language; `Embed` keeps the language and swaps the shape.
+#[derive(Clone, Copy)]
+enum ReformatAxis {
+    /// Vary the frontmatter language (`metadata.format`), keep the embedding shape.
+    Format(fig::Format),
+    /// Vary the embedding shape (`metadata.embed`), keep the frontmatter language.
+    Embed(EmbedStyle),
+}
 
 /// The files [`Workspace::create`] wrote. Under a combined parent this is just
 /// the one document; under a **separated** parent it is the pair — the metadata
@@ -1545,6 +1558,52 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         format: fig::Format,
         recursive: bool,
     ) -> Result<usize> {
+        self.reformat_sweep(file, ReformatAxis::Format(format), recursive)
+            .await
+    }
+
+    /// Convert the metadata block of the document at `file` to a different
+    /// *embedding shape* — re-emitting its frontmatter as `style`
+    /// (`delimited`/`code_block`/`html_script`/`html_code`) while keeping its
+    /// frontmatter *language* and every value. The companion of
+    /// [`convert_meta_format`](Self::convert_meta_format) on the other metadata axis:
+    /// where that keeps the shape and swaps the language, this keeps the language
+    /// and swaps the shape — so a `delimited` YAML block can become a ```` ```yaml ````
+    /// code block that can then hold fig.
+    ///
+    /// Same discipline as its companion: per-file by default (`recursive` sweeps the
+    /// spanning subtree), a no-op when the document is already in `style` or carries
+    /// no block. Two shapes are out of scope and rejected: `separate` (moving
+    /// metadata to a sibling file is a move, not a re-fence), and a language the
+    /// target shape cannot carry (`delimited` + fig — fig has no delimiter syntax).
+    /// Returns the number of documents actually rewritten.
+    pub async fn convert_meta_embed(
+        &mut self,
+        file: &Path,
+        style: EmbedStyle,
+        recursive: bool,
+    ) -> Result<usize> {
+        self.reformat_sweep(file, ReformatAxis::Embed(style), recursive)
+            .await
+    }
+
+    /// The shared engine behind [`convert_meta_format`](Self::convert_meta_format)
+    /// and [`convert_meta_embed`](Self::convert_meta_embed): resolve the target
+    /// document set (this file, or its spanning subtree under `recursive`) and
+    /// reformat each along `axis`, staging the whole sweep as one change set.
+    ///
+    /// One set for the subtree, not one per document — a recursive convert is a
+    /// single edit to the reader, so a failure partway down leaves nothing
+    /// converted. Every document is independent (nothing reads what another wrote),
+    /// so the sweep stages cleanly. `named` gates whether an out-of-scope document
+    /// is a hard error (the user pointed at it) or a skip (it merely fell inside
+    /// the subtree).
+    async fn reformat_sweep(
+        &mut self,
+        file: &Path,
+        axis: ReformatAxis,
+        recursive: bool,
+    ) -> Result<usize> {
         let file = link::normalize(file);
         if !self.fs().try_exists(&self.root().join(&file)).await? {
             return Err(Error::NotFound(file.to_path_buf()));
@@ -1554,16 +1613,10 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         } else {
             vec![file.clone()]
         };
-        // Staged as one change set for the whole subtree — a recursive convert is a
-        // single edit to the reader, atomic if any document fails to reformat. Each
-        // document is independent (nothing reads what another wrote), so the sweep
-        // stages cleanly. `named` gates whether an out-of-scope (whole-file)
-        // document is a hard error (the user pointed at it) or a skip (it merely
-        // fell inside the subtree).
         let mut cs = self.change();
         for path in &targets {
             let named = path == &file;
-            if let Some(text) = self.reformat_document(path, format, named).await? {
+            if let Some(text) = self.reformat_document(path, axis, named).await? {
                 cs.write(path, text);
             }
         }
@@ -1572,15 +1625,22 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         Ok(changed)
     }
 
-    /// Reformat the metadata block of the document at `path` to `format`, returning
-    /// its new text, or `None` when nothing should change (no metadata, already in
-    /// `format`, or an out-of-scope whole-file document under a recursive sweep).
-    /// `named` is true when the caller pointed at this document directly, so a
-    /// whole-file document is a hard error rather than a silent skip.
+    /// Reformat the metadata block of the document at `path` along `axis`, returning
+    /// its new text, or `None` when nothing should change (no metadata block, or the
+    /// document already sits at the requested value, or an out-of-scope whole-file
+    /// document under a recursive sweep). `named` is true when the caller pointed at
+    /// this document directly, so an out-of-scope document is a hard error rather
+    /// than a silent skip.
+    ///
+    /// The two axes converge on the same reconstruction: resolve a target
+    /// [`EmbedType`](crate::document::EmbedType) from the document's `(style, format)`
+    /// pair with one coordinate replaced, then re-emit the block in it. `Format`
+    /// replaces the format and keeps the current style; `Embed` replaces the style
+    /// and keeps the current format.
     async fn reformat_document(
         &self,
         path: &Path,
-        format: fig::Format,
+        axis: ReformatAxis,
         named: bool,
     ) -> Result<Option<String>> {
         let (_, doc) = self.load(path).await?;
@@ -1589,33 +1649,58 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         };
         let kind = match doc.carrier {
             Some(MetaCarrier::Fenced(kind)) => kind,
-            // The whole file *is* the metadata: converting its format renames the
-            // file and re-points every link at it — a move, not a re-fence, and out
-            // of this op's scope. An error when named directly; skipped in a sweep.
+            // The whole file *is* the metadata: re-embedding it means creating or
+            // deleting a fenced host and moving the body — a move, not a re-fence,
+            // and out of scope. An error when named directly; skipped in a sweep.
             Some(MetaCarrier::WholeFile(_)) if named => {
                 return Err(Error::Structure(format!(
                     "{}: whole-file (separate) metadata — its format is its file \
-                     extension; converting it is a move, not supported by `convert`",
+                     extension and its shape is its own file; converting it is a move, \
+                     not supported by `convert`",
                     path.display()
                 )));
             }
             _ => return Ok(None),
         };
-        if kind.inner_format() == format {
-            return Ok(None); // already in the target format
-        }
-        let style = crate::document::embed_style_of(kind);
+        // Resolve the target `(style, format)` from the current pair with the axis's
+        // coordinate replaced; a document already at the requested value is a no-op.
+        let (style, format) = match axis {
+            ReformatAxis::Format(format) => {
+                if kind.inner_format() == format {
+                    return Ok(None);
+                }
+                (crate::document::embed_style_of(kind), format)
+            }
+            ReformatAxis::Embed(style) => {
+                if crate::document::embed_style_of(kind) == style {
+                    return Ok(None);
+                }
+                // `separate` is a whole-file sidecar, not a fenced shape — the same
+                // move `WholeFile` above is, in the other direction.
+                if style == EmbedStyle::Separate {
+                    return Err(Error::Structure(format!(
+                        "{}: `separate` moves metadata into a sibling file and re-points \
+                         its links — a move, not supported by `convert`",
+                        path.display()
+                    )));
+                }
+                (style, kind.inner_format())
+            }
+        };
         let target = match crate::document::embed_carrier(style, format) {
             Some(MetaCarrier::Fenced(target)) => target,
-            // The style can't hold this format — notably `delimited` + fig (the fig
-            // dialect has no `---`-style delimiter). A real "impossible as asked",
-            // so it errors (aborting a recursive sweep) rather than skipping.
+            // The only `(style, format)` with no fenced archetype is
+            // `delimited` + fig — the fig dialect has no `---`-style delimiter. A
+            // real "impossible as asked" (reached converting *to* fig from a
+            // delimited block, or *to* delimited from a fig one), so it errors
+            // rather than skipping, aborting any recursive sweep.
             _ => {
+                let fmt = crate::config::metadata_format_str(format);
                 return Err(Error::Structure(format!(
-                    "{}: {} embedding has no {} form — convert `metadata.embed` first",
+                    "{}: a {} block cannot carry {fmt} — {fmt} has no delimiter syntax; \
+                     use a code_block or HTML embedding",
                     path.display(),
                     style.as_config_str(),
-                    crate::config::metadata_format_str(format),
                 )));
             }
         };
@@ -3149,15 +3234,90 @@ mod tests {
         assert!(code.contains("title = Root"), "fig dialect: {code}");
         assert!(code.ends_with("body\n"), "body untouched: {code}");
 
-        // A delimited (`---`) block has no fig form — a hard error, not a silent skip.
+        // A delimited (`---`) block cannot carry fig — a hard error, not a silent skip.
         write(&dir, "delim.md", "---\ntitle: Root\n---\nbody\n");
         let err =
             block_on(ws(&dir).convert_meta_format(Path::new("delim.md"), fig::Format::Fig, false))
                 .unwrap_err();
         assert!(
-            err.to_string().contains("no fig form"),
+            err.to_string().contains("cannot carry fig"),
             "clear diagnostic: {err}"
         );
+    }
+
+    // Sequence layout is the trap here: fig's per-key Embed splice renders a
+    // single-element sequence as a broken inline `* item`, so the reconstruction
+    // must go through the canonical serializer. Needs fig on top of the yaml gate.
+    #[cfg(feature = "fig-lang")]
+    #[test]
+    fn convert_meta_format_renders_sequences_the_canonical_way() {
+        let dir = tempdir("convert-meta-seq");
+        // A *single-element* `contents` is the case that exposed the splice bug.
+        write(
+            &dir,
+            "index.md",
+            "```yaml\ntitle: Root\ncontents:\n- '[Leaf](/leaf.md)'\n```\n# Root\n",
+        );
+        write(
+            &dir,
+            "leaf.md",
+            "```yaml\ntitle: Leaf\npart_of: /index.md\n```\n",
+        );
+
+        block_on(ws(&dir).convert_meta_format(Path::new("index.md"), fig::Format::Fig, false))
+            .unwrap();
+        let out = read(&dir, "index.md");
+        // The link survives as a real sequence element, not fused into a scalar.
+        assert!(
+            out.contains("[Leaf](/leaf.md)") && !out.contains("= * ["),
+            "sequence stays well-formed: {out}"
+        );
+        // The proof it is well-formed: the workspace re-parses and validates.
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+    }
+
+    #[cfg(feature = "fig-lang")]
+    #[test]
+    fn convert_meta_embed_reshapes_the_block_and_unblocks_fig() {
+        // The motivating flow: a `delimited` block cannot hold fig, but re-embedding
+        // it as a `code_block` (language kept) can then be converted to fig.
+        let dir = tempdir("convert-meta-embed");
+        write(
+            &dir,
+            "index.md",
+            "---\ntitle: Root\ncontents:\n- '[Leaf](/leaf.md)'\n---\n# Root\n",
+        );
+        write(
+            &dir,
+            "leaf.md",
+            "---\ntitle: Leaf\npart_of: /index.md\n---\n",
+        );
+
+        // delimited → code_block keeps the YAML language, only the shape changes.
+        let n = block_on(ws(&dir).convert_meta_embed(
+            Path::new("index.md"),
+            EmbedStyle::CodeBlock,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(n, 1);
+        let code = read(&dir, "index.md");
+        assert!(code.starts_with("```yaml\n"), "now a code block: {code}");
+        assert!(code.ends_with("# Root\n"), "body untouched: {code}");
+        // …which the format axis can now carry to fig.
+        block_on(ws(&dir).convert_meta_format(Path::new("index.md"), fig::Format::Fig, false))
+            .unwrap();
+        assert!(read(&dir, "index.md").starts_with("```fig\n"));
+        assert_eq!(block_on(ws(&dir).check("index.md")).unwrap(), vec![]);
+
+        // `separate` is a whole-file move, out of scope — a clear refusal.
+        let err = block_on(ws(&dir).convert_meta_embed(
+            Path::new("leaf.md"),
+            EmbedStyle::Separate,
+            false,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("separate"), "{err}");
     }
 
     #[cfg(feature = "json")]

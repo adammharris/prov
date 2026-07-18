@@ -8,7 +8,7 @@ colophon
 > content_format = markdown
 > metadata
 > > format = fig
-> > embed = delimited
+> > embed = code_block
 > references
 > > notation = markdown
 > > path_style = root

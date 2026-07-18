@@ -182,32 +182,48 @@ pub fn unset_in_text(text: &str, carrier: Option<MetaCarrier>, dotted: &str) -> 
     editor.render()
 }
 
-/// Re-emit `mapping` as a fresh metadata block of archetype `target`, prepended
-/// to (or appended after, for endmatter) the plain `body` — the reconstruction a
-/// *format conversion* performs. Unlike the comment-preserving edits above, this
+/// Re-emit `mapping` as a fresh metadata block of archetype `target`, placed in
+/// `target`'s canonical position around the plain `body` (before it for
+/// frontmatter, after it for endmatter) — the reconstruction a *format
+/// conversion* performs. Unlike the comment-preserving edits above, this
 /// deliberately rebuilds the block: a conversion crosses formats (a YAML comment
-/// has no JSON home), so only the values survive. The block is synthesized in
-/// `target`'s archetype and every entry spliced in through fig's [`Embed`], so
-/// each format's fences, escaping, and (for HTML islands) entity-encoding are the
-/// library's business rather than reproduced here.
+/// has no JSON home), so only the values survive.
 ///
-/// Keys are written in the mapping's own order — frontmatter order is
-/// significant to readers — with the same block layout (`width(1)`, one list item
-/// per line) [`crate::meta::serialize_mapping`] uses, so a converted block reads
-/// like a hand-authored one.
+/// The content is rendered by colophon's canonical [`serialize_mapping`] — the
+/// same serializer behind `colophon meta --format`, so a converted block's
+/// sequence and scalar layout matches the rest of the codebase (fig's per-key
+/// [`Embed`] splice path renders some formats, notably fig sequences,
+/// differently). The block's fences and placement come from fig, by synthesizing
+/// an empty `target` block around `body` and splicing the serialized content into
+/// its content slot.
+///
+/// The content is spliced verbatim — the same bytes colophon's reader
+/// ([`Document::parse`](crate::Document::parse), via [`fig::split`]) hands back to
+/// the format parser, which does not HTML-decode a `<pre><code>` island. Writing
+/// what that reader expects keeps a converted value round-tripping through
+/// `colophon get`/`check` rather than acquiring stray `&lt;` entities.
+///
+/// [`serialize_mapping`]: crate::meta::serialize_mapping
 pub fn reformat_block(body: &str, mapping: &Mapping, target: EmbedType) -> Result<String> {
-    let mut embed = Embed::open_or_init(body.as_bytes(), target)?;
-    // Block layout for nested maps/sequences, matching `serialize_mapping`; a
-    // scalar ignores the width, so it is harmless there.
-    let options = fig::SerializeOptions::default().width(1);
-    for (key, value) in mapping {
-        embed.set_value_with(
-            &[Segment::Key(key.as_str())],
-            fig::Value::from(value),
-            options,
-        )?;
+    let mut inner = crate::meta::serialize_mapping(mapping, target.inner_format())?;
+    // The content slot sits between the opening fence's trailing newline and the
+    // closing fence, so the content must end in exactly one newline for the close
+    // fence to land on its own line.
+    if !inner.ends_with('\n') {
+        inner.push('\n');
     }
-    Ok(embed.render()?.to_string())
+    // Synthesize an empty `target` block in its canonical place around `body`,
+    // then replace its (empty) content slot with the serialized content: fig owns
+    // the fences and placement, we own what goes between them.
+    let rendered = Embed::open_or_init(body.as_bytes(), target)?
+        .render()?
+        .to_string();
+    let content = Embed::extract(&rendered, target)?.region().content;
+    let mut out = String::with_capacity(rendered.len() + inner.len());
+    out.push_str(&rendered[..content.start]);
+    out.push_str(&inner);
+    out.push_str(&rendered[content.end..]);
+    Ok(out)
 }
 
 #[cfg(test)]

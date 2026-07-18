@@ -1584,10 +1584,21 @@ fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResu
             persist(&ctx, &mut ws)?;
             println!("converted {n} document(s) to {value} frontmatter");
         }
+        "metadata.embed" | "metadata_embed" | "embed" => {
+            let style = EmbedStyle::from_config_str(value).ok_or_else(|| {
+                format!(
+                    "unknown metadata.embed `{value}` \
+                     (expected delimited|code_block|html_script|html_code)"
+                )
+            })?;
+            let n = block_on(ws.convert_meta_embed(&ws_rel(&ctx, file)?, style, recursive))?;
+            persist(&ctx, &mut ws)?;
+            println!("converted {n} document(s) to {value} embedding");
+        }
         other => {
             return Err(format!(
-                "convert: axis `{other}` is not supported \
-                 (only `notation`, `path_style`, and `metadata.format`)"
+                "convert: axis `{other}` is not supported (only `notation`, `path_style`, \
+                 `metadata.format`, and `metadata.embed`)"
             )
             .into());
         }
