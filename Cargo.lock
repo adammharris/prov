@@ -419,9 +419,9 @@ dependencies = [
 
 [[package]]
 name = "twig-doc"
-version = "2.1.0"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0116affe76da33c97e4c5d85174782646790670c1c8649c1843c4aecc156b491"
+checksum = "3035aca2f0b61fa0e86e984097c7f064603985a6e4607c44a91a57206e2b730c"
 
 [[package]]
 name = "unicode-ident"
