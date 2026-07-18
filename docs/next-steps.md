@@ -1,6 +1,6 @@
----
-part_of: '[colophon](/README.md)'
----
+```fig
+part_of = [colophon](/README.md)
+```
 # Next steps — working notes
 
 Deferred items from the identity / wikilink / link-syntax work, so we don't lose

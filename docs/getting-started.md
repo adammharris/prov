@@ -1,7 +1,7 @@
----
-title: Getting Started with colophon
-part_of: '[colophon](/README.md)'
----
+```fig
+title = Getting Started with colophon
+part_of = [colophon](/README.md)
+```
 
 # Getting Started with colophon
 

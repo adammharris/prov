@@ -1,6 +1,6 @@
----
-part_of: '[colophon](/README.md)'
----
+```fig
+part_of = [colophon](/README.md)
+```
 # `init` over existing content — detection & adoption
 
 > Working design. What `colophon init` should do when the target directory

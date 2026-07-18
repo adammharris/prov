@@ -1,6 +1,6 @@
----
-part_of: '[colophon](/README.md)'
----
+```fig
+part_of = [colophon](/README.md)
+```
 # colophon — design & vision
 
 > A *self-describing plaintext workspace*: a set of documents whose structure

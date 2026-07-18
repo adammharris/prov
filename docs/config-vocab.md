@@ -1,6 +1,6 @@
----
-part_of: '[colophon](/README.md)'
----
+```fig
+part_of = [colophon](/README.md)
+```
 # Config vocabulary — the reshaped spec
 
 > Locked design for the workspace-config vocabulary and where it lives. Supersedes

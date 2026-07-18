@@ -1,6 +1,6 @@
----
-part_of: '[colophon](/README.md)'
----
+```fig
+part_of = [colophon](/README.md)
+```
 # Reference styles
 
 How a durable reference — a relation target in metadata, or (eventually) a body
