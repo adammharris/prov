@@ -67,7 +67,7 @@
 
             meta = {
               description = "Command-line companion for the prov self-describing workspace library";
-              homepage = "https://github.com/adammharris/prov";
+              homepage = "https://github.com/diaryx-org/prov";
               license = with pkgs.lib.licenses; [ mit asl20 ];
               mainProgram = "prov";
               platforms = pkgs.lib.platforms.unix;

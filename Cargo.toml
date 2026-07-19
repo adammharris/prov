@@ -9,8 +9,8 @@ edition = "2024"
 # `if let … && let …` let-chains in stable positions, stabilized in 1.88 — so 1.88
 # is the true floor, enforced by the `msrv` CI job (which reads this very value).
 rust-version = "1.88"
-repository = "https://github.com/adammharris/prov"
-homepage = "https://github.com/adammharris/prov"
+repository = "https://github.com/diaryx-org/prov"
+homepage = "https://github.com/diaryx-org/prov"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 

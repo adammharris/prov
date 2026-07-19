@@ -55,7 +55,7 @@ findings are diagnosis-only; frontmatter findings are fixable.
 ## Body parsing (`twig`)
 
 The library prov was waiting on to parse file bodies now exists:
-[`twig`](https://github.com/adammharris/twig), a sister Zig-backed project
+[`twig`](https://github.com/diaryx-org/twig), a sister Zig-backed project
 (document formats, the way `fig` is for config formats). Wired in as a path
 dependency for now (`../twig/bindings/rust/twig` from the workspace root) —
 switch to a published version once `twig`'s Rust bindings have proven out.

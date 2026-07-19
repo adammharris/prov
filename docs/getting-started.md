@@ -67,15 +67,14 @@ ties).
 
 ## 2. Install
 
-prov builds from source and needs two toolchains:
+prov builds from source:
 
 - **Rust** (`cargo`, 1.85 or newer) — to build prov itself.
-- **Zig** (0.16.0) — prov's metadata parser (`fig`) and body parser
-  (`twig-doc`) are Zig-backed and compile during the build. Both are ordinary
-  crates.io dependencies, so there is nothing to clone alongside prov.
 
-```console
-$ git clone https://github.com/adammharris/prov
+If you want to set custom (non-default) features for the build, you will also need a Zig 0.16.0 toolchain.
+
+```sh
+$ git clone https://github.com/diaryx-org/prov
 $ cd prov
 $ cargo build --release
 ```
@@ -91,7 +90,7 @@ it by full path. Every example below uses the command name `prov`.
 document that records your preferences. On a terminal it walks you through a
 series of choices:
 
-```console
+```sh
 $ prov init my-vault
 ┌  prov init
 │
@@ -114,7 +113,7 @@ Each prompt has a flag, so you can skip the interview entirely. Pass `--yes`
 (`-y`) to take every default:
 
 <!-- exec -->
-```console
+```sh
 $ prov init my-vault --yes
 initialized /home/you/my-vault
   root: index.md — My Vault
@@ -149,7 +148,7 @@ gates which config languages fit (bare delimiters don't suit `fig`).
 Setting some flags and being prompted for the rest works too. `--reference id`
 needs identity, so it's rejected with `--identity off`:
 
-```console
+```sh
 $ prov init my-vault --content djot --reference id --yes
 initialized /home/you/my-vault
   root: index.dj — My Vault
@@ -162,7 +161,7 @@ to run where a workspace root already exists, so re-running it by mistake is
 safe. Look at the root it wrote:
 
 <!-- exec -->
-```console
+```sh
 $ cd my-vault
 $ cat index.md
 ---
@@ -184,7 +183,7 @@ spanning link — the parent gains a `contents` entry, the child gets a `part_of
 back.
 
 <!-- exec -->
-```console
+```sh
 $ prov new "Rust" --in index.md
 created rust.md (in index.md)
 $ prov new "Zig" --in index.md
@@ -195,7 +194,7 @@ Override the derived filename with `--as <path>` (an exact path) or just its
 extension with `--ext`. Look at what `new` wrote:
 
 <!-- exec -->
-```console
+```sh
 $ cat index.md
 ---
 title: My Vault
@@ -225,7 +224,7 @@ they still describe the same tree.
 root:
 
 <!-- exec -->
-```console
+```sh
 $ prov tree
 index.md — My Vault
 ├── rust.md — Rust
@@ -236,7 +235,7 @@ index.md — My Vault
 links:
 
 <!-- exec -->
-```console
+```sh
 $ prov show index.md
 index.md
   title: My Vault
@@ -258,7 +257,7 @@ More single-document readers:
 | `prov backlinks FILE`  | who links *to* this document, across the workspace |
 
 <!-- exec -->
-```console
+```sh
 $ prov backlinks index.md
 rust.md	part_of	path
 zig.md	part_of	path
@@ -273,7 +272,7 @@ comments, and metadata format. `set` even creates the block if a document has
 none.
 
 <!-- exec -->
-```console
+```sh
 $ prov set rust.md summary "Notes on the Rust language"
 $ prov get rust.md summary
 Notes on the Rust language
@@ -291,7 +290,7 @@ Markdown/Djot body to HTML, and it understands code — a `[[…]]` inside a cod
 span is treated as code, never as a link:
 
 <!-- exec -->
-```console
+```sh
 $ printf '\n# Rust\n\nInline `let x = [[1,2],[3,4]];` is code, not a link.\n' >> rust.md
 $ prov render rust.md
 <h1>Rust</h1>
@@ -310,7 +309,7 @@ pointed at it** — the parent's `contents` entry, the moved file's own relative
 links, overlay links, and body wikilinks across the whole workspace.
 
 <!-- exec -->
-```console
+```sh
 $ prov mv rust.md rust-lang.md
 moved rust.md -> rust-lang.md
 $ prov tree
@@ -325,7 +324,7 @@ for an immediate hard delete. It refuses to orphan children unless you pass
 `--force`, and warns about any links left dangling:
 
 <!-- exec -->
-```console
+```sh
 $ prov rm zig.md
 moved zig.md to the recycle bin (restore with `prov restore`)
 ```
@@ -340,7 +339,7 @@ documents on disk that nothing links to (orphans). It exits non-zero when it
 finds anything, so it fits in CI. Right now the workspace is consistent:
 
 <!-- exec -->
-```console
+```sh
 $ prov check
 ok: no findings
 ```
@@ -351,7 +350,7 @@ the missing inverse, and adopting an orphan). It never edits body prose, so code
 that merely looks like a link is never "repaired":
 
 <!-- exec allow-fail -->
-```console
+```sh
 $ prov unset rust-lang.md part_of
 $ prov check
 index.md: child rust-lang.md does not declare part_of back to it
@@ -363,7 +362,7 @@ $ printf 'y\n' | prov check --fix
 ```
 
 <!-- exec -->
-```console
+```sh
 $ prov check
 ok: no findings
 ```
@@ -396,7 +395,7 @@ Even with `references.target: path`, `lazy` identity (the default) means you can
 mint an ID on demand and paste a durable reference by hand:
 
 <!-- exec -->
-```console
+```sh
 $ prov config identity lazy
 set identity = lazy in prov.yaml
 $ prov id rust-lang.md
@@ -407,7 +406,7 @@ id:s5jpwxz
 The ID survives a move — the registry follows the file:
 
 <!-- exec -->
-```console
+```sh
 $ id=$(prov id rust-lang.md)
 $ prov mv rust-lang.md notes/rust.md
 moved rust-lang.md -> notes/rust.md
@@ -438,7 +437,7 @@ reads and writes it. Keys are grouped into a small nested vocabulary
 silently ignore (a typo, or an unrecognized value).
 
 <!-- exec -->
-```console
+```sh
 $ prov config
 spec: 1
 content_format: markdown
