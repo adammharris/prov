@@ -710,6 +710,7 @@ fn cmd_set(file: &Path, key: &str, value: &str) -> CmdResult {
     let (text, doc) = load(file)?;
     let updated = edit::set_in_text(&text, doc.carrier, key, edit::infer_scalar(value))?;
     std::fs::write(file, updated)?;
+    println!("{}", file.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -717,6 +718,7 @@ fn cmd_unset(file: &Path, key: &str) -> CmdResult {
     let (text, doc) = load(file)?;
     let updated = edit::unset_in_text(&text, doc.carrier, key)?;
     std::fs::write(file, updated)?;
+    println!("{}", file.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -730,7 +732,8 @@ fn cmd_edit(file: &Path) -> CmdResult {
     let ctx = find_root()?;
     let rel = ws_rel(&ctx, file)?;
     if !changed {
-        println!("edited {} (no changes)", rel.display());
+        eprintln!("edited {} (no changes)", rel.display());
+        println!("{}", rel.display());
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -747,19 +750,20 @@ fn cmd_edit(file: &Path) -> CmdResult {
     persist(&ctx, &mut ws)?;
 
     match (wrote, updated.is_some()) {
-        (true, true) => println!(
+        (true, true) => eprintln!(
             "edited {} — stamped `{}` + checksum",
             rel.display(),
             ctx.config.updated
         ),
-        (true, false) => println!("edited {} — content checksum updated", rel.display()),
-        (false, true) => println!(
+        (true, false) => eprintln!("edited {} — content checksum updated", rel.display()),
+        (false, true) => eprintln!(
             "edited {} — stamped `{}`",
             rel.display(),
             ctx.config.updated
         ),
-        _ => println!("edited {}", rel.display()),
+        _ => eprintln!("edited {}", rel.display()),
     }
+    println!("{}", rel.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1074,7 +1078,7 @@ fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {
     // that `Error::Torn` points here to perform actually happens.
     match block_on(prov::recover(&StdFs, &ctx.root_dir))? {
         prov::Recovered::Applied(n) => {
-            println!("recovered an interrupted change: rolled {n} op(s) forward from the journal");
+            eprintln!("recovered an interrupted change: rolled {n} op(s) forward from the journal");
         }
         prov::Recovered::Nothing => {}
     }
@@ -1091,7 +1095,7 @@ fn cmd_check(root: Option<&Path>, fix: bool) -> CmdResult {
         println!("{finding}");
     }
     if findings.is_empty() {
-        println!("ok: no findings");
+        eprintln!("ok: no findings");
         Ok(ExitCode::SUCCESS)
     } else {
         eprintln!("{} finding(s)", findings.len());
@@ -1229,12 +1233,12 @@ fn resolve_placement(
     if dry_run {
         show_route_plan(route, &plan);
         if plan.is_complete() {
-            println!(
+            eprintln!(
                 "\nnothing to create; the route resolves to {}",
                 plan.terminal.display()
             );
         } else if !parents {
-            println!(
+            eprintln!(
                 "\n{} segment(s) missing — re-run with -p to create them",
                 plan.synthesize.len()
             );
@@ -1255,8 +1259,10 @@ fn resolve_placement(
     }
     let created = plan.synthesize.len();
     let terminal = block_on(ws.apply_route(&plan))?;
+    // Synthesized route parents are incidental to the command's result (the leaf),
+    // so their creation is narration → stderr; the caller's stdout is the terminal.
     for synth in &plan.synthesize {
-        println!("created {} ({:?})", synth.path.display(), synth.title);
+        eprintln!("created {} ({:?})", synth.path.display(), synth.title);
     }
     if created > 0 {
         persist(ctx, ws)?;
@@ -1265,9 +1271,9 @@ fn resolve_placement(
 }
 
 fn show_route_plan(route: &str, plan: &RoutePlan) {
-    println!("route {route:?}");
+    eprintln!("route {route:?}");
     for (depth, node) in plan.resolved.iter().enumerate() {
-        println!(
+        eprintln!(
             "  {:indent$}{} (exists)",
             "",
             node.display(),
@@ -1276,7 +1282,7 @@ fn show_route_plan(route: &str, plan: &RoutePlan) {
     }
     let base = plan.resolved.len();
     for (depth, synth) in plan.synthesize.iter().enumerate() {
-        println!(
+        eprintln!(
             "  {:indent$}{} (create, titled {:?})",
             "",
             synth.path.display(),
@@ -1352,7 +1358,7 @@ fn cmd_new(
             .into());
         }
         if dry_run {
-            println!(
+            eprintln!(
                 "exists: {} (in {}) — no-op",
                 path.display(),
                 parent_rel.display()
@@ -1360,14 +1366,16 @@ fn cmd_new(
             return Ok(ExitCode::SUCCESS);
         }
         // Ensure the containment link both ways (idempotent; refuses a contested
-        // parent), so an existing-but-unlinked file converges too.
+        // parent), so an existing-but-unlinked file converges too. The contract is
+        // the *result*, not the action: an idempotent no-op still yields the path.
         block_on(ws.adopt(&path, &parent_rel))?;
         persist(&ctx, &mut ws)?;
-        println!("exists: {} (in {})", path.display(), parent_rel.display());
+        eprintln!("exists: {} (in {})", path.display(), parent_rel.display());
+        println!("{}", path.display());
         return Ok(ExitCode::SUCCESS);
     }
     if dry_run {
-        println!(
+        eprintln!(
             "would create {} (in {})",
             path.display(),
             parent_rel.display()
@@ -1379,22 +1387,24 @@ fn cmd_new(
     let created = block_on(ws.create_with_title(&path, &parent_rel, title))?;
     persist(&ctx, &mut ws)?;
     // A separated child is a pair — the metadata node the parent links, plus its
-    // prose body file. Name both so it is clear two files were written.
+    // prose body file. Name both in the narration so it is clear two files were
+    // written; stdout carries only the node (the linkable document).
     match &created.body {
         Some(body) => {
-            println!(
+            eprintln!(
                 "created {} (in {})",
                 created.node.display(),
                 parent_rel.display()
             );
-            println!("  body: {}", body.display());
+            eprintln!("  body: {}", body.display());
         }
-        None => println!(
+        None => eprintln!(
             "created {} (in {})",
             created.node.display(),
             parent_rel.display()
         ),
     }
+    println!("{}", created.node.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1443,21 +1453,22 @@ fn cmd_attach(
             block_on(ws.loose_attachments_in(&ctx.root_doc))?
         };
         if loose.is_empty() {
-            println!("no loose files to attach");
+            eprintln!("no loose files to attach");
             return Ok(ExitCode::SUCCESS);
         }
         let mut attached = 0usize;
         for p in &loose {
             match block_on(ws.attach(p, &parent_rel)) {
                 Ok(node) => {
-                    println!("attached {} (sidecar {})", p.display(), node.display());
+                    eprintln!("attached {} (sidecar {})", p.display(), node.display());
+                    println!("{}", node.display());
                     attached += 1;
                 }
                 Err(e) => eprintln!("prov: could not attach {}: {e}", p.display()),
             }
         }
         persist(&ctx, &mut ws)?;
-        println!("attached {attached} file(s) under {}", parent_rel.display());
+        eprintln!("attached {attached} file(s) under {}", parent_rel.display());
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -1466,12 +1477,13 @@ fn cmd_attach(
     };
     let node = block_on(ws.attach(&ws_rel(&ctx, payload)?, &parent_rel))?;
     persist(&ctx, &mut ws)?;
-    println!(
+    eprintln!(
         "attached {} (sidecar {} in {})",
         payload.display(),
         node.display(),
         parent_rel.display()
     );
+    println!("{}", node.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1496,7 +1508,7 @@ fn cmd_mv(
     let mut ws = workspace(&ctx)?;
     let to_rel = ws_rel(&ctx, to)?;
     block_on(ws.rename(&ws_rel(&ctx, &from_resolved)?, &to_rel))?;
-    println!("moved {} -> {}", from_resolved.display(), to.display());
+    eprintln!("moved {} -> {}", from_resolved.display(), to.display());
 
     // The move first, then the reparent — in that order because `rename` has
     // already retargeted every inbound link, so the parent the reparent removes is
@@ -1508,9 +1520,11 @@ fn cmd_mv(
             return Ok(ExitCode::SUCCESS);
         };
         block_on(ws.reparent(&to_rel, &parent_rel))?;
-        println!("reparented {} -> in {}", to.display(), parent_rel.display());
+        eprintln!("reparented {} -> in {}", to.display(), parent_rel.display());
     }
     persist(&ctx, &mut ws)?;
+    // The document's new location is the handle a caller acts on next.
+    println!("{}", to_rel.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1539,11 +1553,12 @@ fn cmd_reparent(
     let path_rel = ws_rel(&ctx, &resolve_target(path)?)?;
     block_on(ws.reparent(&path_rel, &parent_rel))?;
     persist(&ctx, &mut ws)?;
-    println!(
+    eprintln!(
         "reparented {} -> in {}",
         path_rel.display(),
         parent_rel.display()
     );
+    println!("{}", path_rel.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1583,7 +1598,8 @@ fn cmd_restore(path: &str) -> CmdResult {
     let from = ws_rel(&ctx, Path::new(path))?;
     block_on(ws.restore(&from, &ctx.root_doc))?;
     persist(&ctx, &mut ws)?;
-    println!("restored {}", from.display());
+    eprintln!("restored {}", from.display());
+    println!("{}", from.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1592,8 +1608,18 @@ fn cmd_empty_bin() -> CmdResult {
     let mut ws = workspace(&ctx)?;
     let purged = block_on(ws.empty_bin(&ctx.root_doc))?;
     persist(&ctx, &mut ws)?;
-    println!("purged {purged} document(s) from the recycle bin");
+    // A bulk purge yields no object to name — narration only, stdout stays empty.
+    eprintln!("purged {purged} document(s) from the recycle bin");
     Ok(ExitCode::SUCCESS)
+}
+
+/// Report a convert sweep: the changed document paths to stdout (one per line,
+/// for `| git add` and friends), the human count to stderr.
+fn report_converted(changed: &[PathBuf], target: &str) {
+    for path in changed {
+        println!("{}", path.display());
+    }
+    eprintln!("converted {} document(s) to {target}", changed.len());
 }
 
 fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResult {
@@ -1609,9 +1635,9 @@ fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResu
                 format!("unknown path_style `{value}` (expected root|relative|canonical)")
             })?;
             let style = LinkStyle::from_axes(ctx.config.notation, ps);
-            let n = block_on(ws.convert_link_style(&ws_rel(&ctx, file)?, style, recursive))?;
+            let changed = block_on(ws.convert_link_style(&ws_rel(&ctx, file)?, style, recursive))?;
             persist(&ctx, &mut ws)?;
-            println!("converted {n} document(s) to {value} path resolution");
+            report_converted(&changed, &format!("{value} path resolution"));
         }
         "notation" => {
             let nt = Notation::from_config_str(value)
@@ -1620,17 +1646,17 @@ fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResu
                 return Err("convert: `wikilink` has no path rendering to convert".into());
             }
             let style = LinkStyle::from_axes(nt, ctx.config.path_style);
-            let n = block_on(ws.convert_link_style(&ws_rel(&ctx, file)?, style, recursive))?;
+            let changed = block_on(ws.convert_link_style(&ws_rel(&ctx, file)?, style, recursive))?;
             persist(&ctx, &mut ws)?;
-            println!("converted {n} document(s) to {value} notation");
+            report_converted(&changed, &format!("{value} notation"));
         }
         "metadata.format" | "metadata_format" | "format" => {
             let fmt = prov::metadata_format_from_str(value).ok_or_else(|| {
                 format!("unknown metadata.format `{value}` (expected yaml|json|toml|fig)")
             })?;
-            let n = block_on(ws.convert_meta_format(&ws_rel(&ctx, file)?, fmt, recursive))?;
+            let changed = block_on(ws.convert_meta_format(&ws_rel(&ctx, file)?, fmt, recursive))?;
             persist(&ctx, &mut ws)?;
-            println!("converted {n} document(s) to {value} frontmatter");
+            report_converted(&changed, &format!("{value} frontmatter"));
         }
         "metadata.embed" | "metadata_embed" | "embed" => {
             let style = EmbedStyle::from_config_str(value).ok_or_else(|| {
@@ -1639,9 +1665,9 @@ fn cmd_convert(file: &Path, axis: &str, value: &str, recursive: bool) -> CmdResu
                      (expected delimited|code_block|html_script|html_code)"
                 )
             })?;
-            let n = block_on(ws.convert_meta_embed(&ws_rel(&ctx, file)?, style, recursive))?;
+            let changed = block_on(ws.convert_meta_embed(&ws_rel(&ctx, file)?, style, recursive))?;
             persist(&ctx, &mut ws)?;
-            println!("converted {n} document(s) to {value} embedding");
+            report_converted(&changed, &format!("{value} embedding"));
         }
         other => {
             return Err(format!(
@@ -1667,7 +1693,8 @@ fn cmd_duplicate(source: &str) -> CmdResult {
     let mut ws = workspace(&ctx)?;
     let copy = block_on(ws.duplicate(&ws_rel(&ctx, &resolved)?))?;
     persist(&ctx, &mut ws)?;
-    println!("duplicated {} -> {}", resolved.display(), copy.display());
+    eprintln!("duplicated {} -> {}", resolved.display(), copy.display());
+    println!("{}", copy.display());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2037,7 +2064,10 @@ fn cmd_config(
             let doc = Document::parse(&config_doc, &text)?;
             let updated = edit::set_in_text(&text, doc.carrier, key, inferred)?;
             std::fs::write(&full, updated)?;
-            println!("set {key} = {value} in {}", config_doc.display());
+            eprintln!("set {key} = {value} in {}", config_doc.display());
+            // Echo the value now in effect, so `v=$(prov config set …)` round-trips
+            // with `prov config <key>`.
+            println!("{value}");
         }
     }
     Ok(ExitCode::SUCCESS)

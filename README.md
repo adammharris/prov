@@ -33,6 +33,31 @@ The name says what it is: **prov** — *Plaintext Records, Organized & Verifiabl
 
 prov is generic over the small async [`prov::Storage`](prov/src/fs.rs) trait, which mirrors the slice of `std::fs` the scan/traverse/mutate engine needs. Implement it over `std::fs`, `tokio::fs`, or a browser filesystem (OPFS/IndexedDB) — the workspace never learns which.
 
+## Output conventions
+
+The `prov` CLI keeps its two output streams cleanly separated, so it composes:
+
+- **stdout** — the *machine value*: the identifier(s) of the object the command produced or read, one per line, undecorated. Empty when there is genuinely no result (`empty-bin`, a `--dry-run`).
+- **stderr** — the *human narration*: `created …`, `moved …`, warnings, previews, `ok: no findings`.
+- **exit code** — success or failure.
+
+So `2>/dev/null` silences the chatter without eating data, and `$(prov new 'Title')` captures a bare path you can pipe or open. The contract is the **result, not the action**: an idempotent `new -p` that finds the document already there still prints its path, while a `--dry-run` prints nothing to stdout (nothing was created).
+
+| Command | stdout |
+| --- | --- |
+| `init` | the root document's path |
+| `new` | the created node's path (idempotent no-op included) |
+| `attach` | each sidecar node path, one per line |
+| `mv` | the destination path |
+| `reparent` | the document's path |
+| `duplicate` | the copy's path |
+| `edit`, `set`, `unset` | the edited document's path |
+| `restore` | the restored document's path |
+| `convert` | each rewritten document's path, one per line |
+| `empty-bin` | *(nothing — a bulk purge names no object)* |
+| `config <key> <value>` | the value now in effect |
+| `meta`, `get`, `body`, `render`, `links`, `tree`, `backlinks`, `id`, `resolve`, `config`, `check` | the requested data (findings, values, edges) |
+
 ## Status
 
 Works for simple workspaces.

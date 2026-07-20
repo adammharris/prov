@@ -1125,15 +1125,18 @@ pub(crate) fn cmd_init(
             dir.display()
         ))?;
     } else {
-        println!("initialized {}", dir.display());
+        eprintln!("initialized {}", dir.display());
         for line in details.lines() {
-            println!("  {line}");
+            eprintln!("  {line}");
         }
         for line in adopt_note.lines().filter(|l| !l.is_empty()) {
-            println!("  {line}");
+            eprintln!("  {line}");
         }
-        println!("{next}");
+        eprintln!("{next}");
     }
+    // The created root document is the workspace's handle — the path a caller opens
+    // or feeds to the next `prov` command. Narration above went to stderr.
+    println!("{}", dir.join(&root_name).display());
     Ok(ExitCode::SUCCESS)
 }
 

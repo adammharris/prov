@@ -1510,14 +1510,14 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// links *it* declares; links elsewhere pointing *at* `file` are those
     /// documents' to convert (so a workspace can sit in a mixed style, which is
     /// valid and `check`-clean). With `recursive`, the same conversion is applied
-    /// to every document in `file`'s spanning subtree. Returns the number of
+    /// to every document in `file`'s spanning subtree. Returns the paths of the
     /// documents actually rewritten.
     pub async fn convert_link_style(
         &mut self,
         file: &Path,
         style: crate::link::LinkStyle,
         recursive: bool,
-    ) -> Result<usize> {
+    ) -> Result<Vec<PathBuf>> {
         let file = link::normalize(file);
         if !self.fs().try_exists(&self.root().join(&file)).await? {
             return Err(Error::NotFound(file.to_path_buf()));
@@ -1533,12 +1533,13 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         // converted. Every document is independent here — nothing reads what an
         // earlier one wrote — so the whole sweep stages cleanly.
         let mut cs = self.change();
+        let mut changed = Vec::new();
         for path in &targets {
             if let Some(text) = self.restyle_document(path, style).await? {
                 cs.write(path, text);
+                changed.push(path.clone());
             }
         }
-        let changed = cs.len();
         self.commit(cs).await?;
         Ok(changed)
     }
@@ -1557,13 +1558,13 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// left untouched; a *whole-file* (separate/config) document is not an embedded
     /// block to re-fence — converting one would rename the file and re-point its
     /// links — so it is an error to name one directly and is skipped under a
-    /// recursive sweep. Returns the number of documents actually rewritten.
+    /// recursive sweep. Returns the paths of the documents actually rewritten.
     pub async fn convert_meta_format(
         &mut self,
         file: &Path,
         format: fig::Format,
         recursive: bool,
-    ) -> Result<usize> {
+    ) -> Result<Vec<PathBuf>> {
         self.reformat_sweep(file, ReformatAxis::Format(format), recursive)
             .await
     }
@@ -1582,13 +1583,13 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
     /// no block. Two shapes are out of scope and rejected: `separate` (moving
     /// metadata to a sibling file is a move, not a re-fence), and a language the
     /// target shape cannot carry (`delimited` + fig — fig has no delimiter syntax).
-    /// Returns the number of documents actually rewritten.
+    /// Returns the paths of the documents actually rewritten.
     pub async fn convert_meta_embed(
         &mut self,
         file: &Path,
         style: EmbedStyle,
         recursive: bool,
-    ) -> Result<usize> {
+    ) -> Result<Vec<PathBuf>> {
         self.reformat_sweep(file, ReformatAxis::Embed(style), recursive)
             .await
     }
@@ -1609,7 +1610,7 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
         file: &Path,
         axis: ReformatAxis,
         recursive: bool,
-    ) -> Result<usize> {
+    ) -> Result<Vec<PathBuf>> {
         let file = link::normalize(file);
         if !self.fs().try_exists(&self.root().join(&file)).await? {
             return Err(Error::NotFound(file.to_path_buf()));
@@ -1620,13 +1621,14 @@ impl<FS: Storage, IdP: IdentityPolicy, Ix: IndexStore> Workspace<FS, IdP, Ix> {
             vec![file.clone()]
         };
         let mut cs = self.change();
+        let mut changed = Vec::new();
         for path in &targets {
             let named = path == &file;
             if let Some(text) = self.reformat_document(path, axis, named).await? {
                 cs.write(path, text);
+                changed.push(path.clone());
             }
         }
-        let changed = cs.len();
         self.commit(cs).await?;
         Ok(changed)
     }
@@ -3127,7 +3129,7 @@ mod tests {
             false,
         ))
         .unwrap();
-        assert_eq!(n, 1, "only the one file converted");
+        assert_eq!(n.len(), 1, "only the one file converted");
 
         let mid = read(&dir, "sub/mid.md");
         // Up-link and body link now relative (destinations preserved, label kept).
@@ -3168,7 +3170,7 @@ mod tests {
             true,
         ))
         .unwrap();
-        assert_eq!(n, 3, "root + a + b all converted");
+        assert_eq!(n.len(), 3, "root + a + b all converted");
 
         let a = read(&dir, "a.md");
         // Path links became root-absolute.
@@ -3207,7 +3209,7 @@ mod tests {
         let n =
             block_on(ws(&dir).convert_meta_format(Path::new("index.md"), fig::Format::Json, false))
                 .unwrap();
-        assert_eq!(n, 1, "only the named file converted");
+        assert_eq!(n.len(), 1, "only the named file converted");
 
         let out = read(&dir, "index.md");
         assert!(out.starts_with(";;;\n"), "delimited JSON now: {out}");
@@ -3233,7 +3235,7 @@ mod tests {
         let n =
             block_on(ws(&dir).convert_meta_format(Path::new("code.md"), fig::Format::Fig, false))
                 .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n.len(), 1);
         let code = read(&dir, "code.md");
         assert!(code.starts_with("```fig\n"), "code block kept: {code}");
         assert!(code.contains("title = Root"), "fig dialect: {code}");
@@ -3305,7 +3307,7 @@ mod tests {
             false,
         ))
         .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n.len(), 1);
         let code = read(&dir, "index.md");
         assert!(code.starts_with("```yaml\n"), "now a code block: {code}");
         assert!(code.ends_with("# Root\n"), "body untouched: {code}");
@@ -3349,7 +3351,8 @@ mod tests {
             block_on(ws(&dir).convert_meta_format(Path::new("index.md"), fig::Format::Json, true))
                 .unwrap();
         assert_eq!(
-            n, 1,
+            n.len(),
+            1,
             "only the root actually changed (a.md was already JSON)"
         );
         assert!(read(&dir, "index.md").starts_with(";;;\n"));
