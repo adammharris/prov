@@ -75,6 +75,13 @@ pub(crate) fn sidecar_name(stem: &str, format: Format) -> String {
 #[derive(Parser)]
 #[command(name = "prov", version, about, long_about = None)]
 pub(crate) struct Cli {
+    /// Run as if started in this directory — discover the workspace root from
+    /// here instead of the current directory (like `git -C`, this goes *before*
+    /// the subcommand: `prov -C ~/vault check`). Also settable via the `PROV_ROOT`
+    /// environment variable; the flag wins. Lets a script or cron operate on a
+    /// vault without `cd`-ing into it. Relative path arguments resolve here too.
+    #[arg(short = 'C', long = "root", value_name = "DIR")]
+    pub(crate) root: Option<PathBuf>,
     #[command(subcommand)]
     pub(crate) command: Command,
 }

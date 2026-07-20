@@ -39,6 +39,19 @@ use cli::*;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // `-C <dir>` / `--root <dir>` (or `PROV_ROOT`, which it overrides) runs prov
+    // as if it had started in that directory: chdir once, up front, so every
+    // downstream `current_dir()`-based root discovery and every relative path
+    // argument resolves there — the `git -C` model, in one place.
+    if let Some(dir) = cli
+        .root
+        .clone()
+        .or_else(|| std::env::var_os("PROV_ROOT").map(PathBuf::from))
+        && let Err(e) = std::env::set_current_dir(&dir)
+    {
+        eprintln!("prov: could not use root directory {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
     let result = match cli.command {
         Command::Show { file } => resolve_target(&file).and_then(|f| cmd_show(&f)),
         Command::Links { file, relation } => {
