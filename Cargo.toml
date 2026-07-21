@@ -3,7 +3,7 @@ resolver = "2"
 members = ["prov", "prov-cli"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 # Minimum supported Rust version. Edition 2024 needs 1.85, but the crate also uses
 # `if let … && let …` let-chains in stable positions, stabilized in 1.88 — so 1.88
@@ -38,4 +38,4 @@ twig-doc = { version = "2.3.0" }
 moid = "0.1.1"
 
 # Internal crate.
-prov = { path = "prov", version = "0.3.1" }
+prov = { path = "prov", version = "0.3.2" }
